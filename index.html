@@ -1,0 +1,2957 @@
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged, signOut } from 'firebase/auth';
+import { getFirestore, collection, query, onSnapshot, addDoc, doc, deleteDoc, updateDoc } from 'firebase/firestore'; 
+import { DollarSign, Users, TrendingUp, Clock, CreditCard, Home, Settings, User, BarChart, Bell, ArrowUpRight, ArrowDownRight, Download, Search, FileText, X, Check, Loader, UserPlus, Zap, Trash2, Upload, UserCog, Calendar, FileMinus, FilePlus, LogIn, LogOut, Edit, Sun, Moon, Menu } from 'lucide-react';
+import Chart from 'chart.js/auto';
+
+// --- GLOBAL VARIABLES & FIREBASE CONFIGURATION ---
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// Initialize Firebase App
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
+
+// Helper function for Firestore paths (jalur publik standar)
+const getCollectionPath = (collectionName) => {
+    return `artifacts/${appId}/public/data/${collectionName}`;
+};
+
+// --- CONSTANTS & ROLES ---
+const ROLES = {
+    ADMIN_KEUANGAN: 'Admin Keuangan',
+    TATA_USAHA: 'Tata Usaha',
+    KEPALA_SEKOLAH: 'Kepala Sekolah',
+    GUEST: 'Guest'
+};
+
+// Data pengguna DEMO yang TELAH DIPERBARUI
+const DEMO_USERS = {
+    'admin123@smpmuh7.sch.id': { role: ROLES.ADMIN_KEUANGAN, password: '123' },
+    'kepsek123@smpmuh7.sch.id': { role: ROLES.KEPALA_SEKOLAH, password: '123' },
+    'tatausaha123@smpmuh7.sch.id': { role: ROLES.TATA_USAHA, password: '123' },
+};
+
+const getUserRoleByEmail = (email) => {
+    return DEMO_USERS[email]?.role || ROLES.GUEST;
+};
+
+// Variabel sementara untuk menyimpan email yang berhasil diverifikasi secara lokal
+let localVerifiedEmail = null; 
+
+// --- UTILITIES ---
+const formatRupiah = (number) => new Intl.NumberFormat('id-ID', {
+    style: 'currency',
+    currency: 'IDR',
+    minimumFractionDigits: 0,
+}).format(number);
+
+const today = new Date();
+
+const exportToCSV = (data, fileName) => {
+    if (!data || data.length === 0) return false; // Mengembalikan false jika data kosong
+
+    const headers = Object.keys(data[0]);
+    const csvContent = "data:text/csv;charset=utf-8,"
+        + headers.join(";") + "\n"
+        + data.map(row => headers.map(h => {
+            let value = row[h];
+            // Bersihkan format Rupiah dan titik dari angka
+            if (typeof value === 'number') {
+                value = String(value);
+            } else if (typeof value === 'string') {
+                 value = value.replace(/Rp\s?\.?/g, '').replace(/\./g, '').trim();
+            }
+            // Pastikan tidak ada koma yang merusak format CSV, gunakan petik ganda
+            if (typeof value === 'string' && (value.includes(';') || value.includes('"') || value.includes('\n'))) {
+                value = `"${value.replace(/"/g, '""')}"`;
+            }
+            return value;
+        }).join(";")).join("\n");
+
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", fileName);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    return true;
+};
+
+// --- CORE UI COMPONENTS ---
+
+/**
+ * Status Badge Component (Lebih Canggih)
+ */
+const StatusBadge = ({ children, type }) => {
+    let classes = "";
+    if (type === 'success') classes = 'bg-emerald-100 text-emerald-800 dark:bg-emerald-800 dark:text-emerald-100';
+    if (type === 'error') classes = 'bg-red-100 text-red-800 dark:bg-red-800 dark:text-red-100';
+    if (type === 'warning') classes = 'bg-orange-100 text-orange-800 dark:bg-orange-800 dark:text-orange-100';
+    if (type === 'info') classes = 'bg-blue-100 text-blue-800 dark:bg-blue-800 dark:text-blue-100';
+
+    return <span className={`inline-flex items-center px-3 py-0.5 rounded-full text-xs font-medium ${classes}`}>{children}</span>;
+};
+
+/**
+ * Custom Modal Component
+ */
+const Modal = ({ isOpen, onClose, title, children, maxWidth = 'max-w-lg' }) => {
+    if (!isOpen) return null;
+    return (
+        <div className="fixed inset-0 bg-gray-900 bg-opacity-60 dark:bg-opacity-80 flex items-center justify-center z-[1000] p-4">
+            <div className={`bg-white dark:bg-gray-800 p-6 rounded-xl shadow-2xl w-full ${maxWidth} transition-all duration-300 transform scale-100 opacity-100`}>
+                <div className="flex justify-between items-center pb-3 border-b border-gray-100 dark:border-gray-700">
+                    <h3 className="text-xl font-bold text-blue-800 dark:text-blue-400">{title}</h3>
+                    <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1 rounded-full hover:bg-gray-100 dark:hover:bg-gray-700 dark:text-gray-500 dark:hover:text-white">
+                        <X className="w-5 h-5" />
+                    </button>
+                </div>
+                <div className="mt-4">
+                    {children}
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// --- KOMPONEN BARU: HEADER CANGGIH (MINIMALIS) ---
+const PageHeader = ({ currentView, userRole, isDarkMode, toggleDarkMode }) => {
+    const [currentTime, setCurrentTime] = useState(new Date());
+
+    useEffect(() => {
+        const timer = setInterval(() => {
+            setCurrentTime(new Date());
+        }, 1000);
+        return () => clearInterval(timer);
+    }, []);
+
+    const viewTitles = {
+        dashboard: 'Beranda Analitik',
+        arrears: 'Laporan Piutang SPP',
+        reports: 'Laporan Keuangan Tahunan',
+        payments: 'Input Pembayaran SPP',
+        paymentHistory: 'Riwayat Transaksi',
+        cashflow: 'Manajemen Kas Umum',
+        students: 'Manajemen Siswa',
+        fees: 'Manajemen Master Biaya',
+        settings: 'Pengaturan Aplikasi',
+    };
+
+    const formattedTime = currentTime.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const formattedDate = currentTime.toLocaleDateString('id-ID', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+
+    return (
+        // Header dibuat lebih minimalis (p-4)
+        <header className="sticky top-0 bg-white dark:bg-gray-900 z-20 p-3 rounded-xl shadow-sm border border-gray-100 dark:border-gray-700 mb-6 flex justify-between items-center flex-wrap gap-3">
+            <div>
+                <p className="text-xs font-medium text-blue-600 dark:text-blue-400">Anda di: {userRole}</p>
+                <h1 className="text-xl font-extrabold text-gray-900 dark:text-white">{viewTitles[currentView] || 'SMP Muhammadiyah 7'}</h1>
+            </div>
+            <div className="flex items-center gap-3">
+                
+                {/* DARK MODE TOGGLE DIPINDAH DI SINI */}
+                <button
+                    onClick={toggleDarkMode}
+                    className="p-2 rounded-full border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition"
+                    aria-label="Toggle Dark Mode"
+                >
+                    {isDarkMode ? <Sun className="w-5 h-5 text-yellow-500" /> : <Moon className="w-5 h-5" />}
+                </button>
+                
+                <div className="text-right">
+                    <p className="text-sm font-semibold text-gray-700 dark:text-gray-300">
+                        <Clock className="w-4 h-4 inline-block mr-1 text-gray-500 dark:text-gray-400" /> {formattedTime}
+                    </p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{formattedDate}</p>
+                </div>
+            </div>
+        </header>
+    );
+};
+
+
+/**
+ * Sidebar Navigation Component (Desain Canggih + Dropdown + Dark Mode Toggle)
+ */
+const Sidebar = ({ currentView, setView, userRole, isMobileOpen, setIsMobileOpen, onLogout }) => {
+    
+    // State untuk mengelola status collapse/dropdown menu
+    const [collapsedCategories, setCollapsedCategories] = useState({});
+
+    const toggleCategory = (category) => {
+        setCollapsedCategories(prev => ({
+            ...prev,
+            [category]: !prev[category]
+        }));
+    };
+
+    const navItems = useMemo(() => ([
+        {
+            category: 'Dashboard & Analitik',
+            role: [ROLES.ADMIN_KEUANGAN, ROLES.TATA_USAHA, ROLES.KEPALA_SEKOLAH],
+            items: [
+                { name: 'Beranda Analitik', icon: Home, view: 'dashboard' },
+                { name: 'Laporan Piutang', icon: Clock, view: 'arrears' },
+                { name: 'Laporan Keuangan', icon: BarChart, view: 'reports' },
+            ],
+        },
+        {
+            category: 'Operasi Transaksi',
+            // Kepala Sekolah bisa melihat RIWAYAT, tetapi Input/Kas Umum hanya untuk Admin/TU
+            role: [ROLES.ADMIN_KEUANGAN, ROLES.TATA_USAHA, ROLES.KEPALA_SEKOLAH], 
+            items: [
+                { name: 'Input Pembayaran SPP', icon: CreditCard, view: 'payments', role: [ROLES.ADMIN_KEUANGAN, ROLES.TATA_USAHA] },
+                { name: 'Riwayat Transaksi', icon: FileText, view: 'paymentHistory', role: [ROLES.ADMIN_KEUANGAN, ROLES.TATA_USAHA, ROLES.KEPALA_SEKOLAH] }, 
+                { name: 'Kas Sekolah (Umum)', icon: DollarSign, view: 'cashflow', role: [ROLES.ADMIN_KEUANGAN, ROLES.TATA_USAHA, ROLES.KEPALA_SEKOLAH] },
+            ],
+        },
+        {
+            category: 'Data Master',
+            role: [ROLES.ADMIN_KEUANGAN, ROLES.KEPALA_SEKOLAH], // Kepala Sekolah diizinkan melihat data master
+            items: [
+                { name: 'Manajemen Siswa', icon: Users, view: 'students', role: [ROLES.ADMIN_KEUANGAN, ROLES.KEPALA_SEKOLAH] },
+                { name: 'Manajemen Biaya', icon: Settings, view: 'fees', role: [ROLES.ADMIN_KEUANGAN, ROLES.KEPALA_SEKOLAH] }, 
+            ],
+        },
+        // KATEGORI BARU: SISTEM & KONFIGURASI
+        {
+            category: 'Sistem & Konfigurasi',
+            role: [ROLES.ADMIN_KEUANGAN],
+            items: [
+                { name: 'Pengaturan Aplikasi', icon: UserCog, view: 'settings', role: [ROLES.ADMIN_KEUANGAN] }, 
+            ],
+        },
+    ]), [userRole]);
+
+    // Memfilter item menu berdasarkan peran pengguna yang sedang login
+    const filteredNavItems = navItems.map(cat => ({
+        ...cat,
+        items: cat.items.filter(item => item.role ? item.role.includes(userRole) : cat.role.includes(userRole))
+    })).filter(cat => cat.items.length > 0);
+
+    return (
+        <div className={`fixed inset-y-0 left-0 w-64 bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 p-4 transition-transform duration-300 z-50 shadow-xl lg:translate-x-0 ${isMobileOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+            <div className="flex items-center justify-between h-16 mb-4 border-b border-blue-100 dark:border-blue-900"> 
+                {/* PERUBAHAN UKURAN FONT JUDUL (Lebih kecil dari h1) */}
+                <h1 className="text-base font-extrabold text-blue-900 dark:text-white">SMP Muhammadiyah 7 <span className="text-xs font-light block text-blue-600 dark:text-blue-400">Sistem Keuangan</span></h1> 
+                <button
+                    className="lg:hidden text-gray-500 hover:text-blue-600 p-2"
+                    onClick={() => setIsMobileOpen(false)}
+                >
+                    <X className="w-6 h-6" />
+                </button>
+            </div>
+            
+            {/* Navigasi Utama Dibuat Scrollable */}
+            <nav className="flex-1 overflow-y-auto" style={{ height: 'calc(100% - 11rem)' }}> 
+                {filteredNavItems.map((category) => {
+                    // Defaultkan kategori ke terbuka (false) agar tidak kosong saat pertama load
+                    const isCollapsed = collapsedCategories[category.category] === true; 
+                    return (
+                        <div key={category.category} className="mb-2"> 
+                            
+                            {/* TOMBOL KATEGORI DROPDOWN */}
+                            <button
+                                onClick={() => toggleCategory(category.category)}
+                                className="flex items-center justify-between w-full p-2 text-xs font-semibold uppercase text-gray-600 dark:text-gray-300 tracking-wider hover:bg-gray-50 dark:hover:bg-gray-700 rounded-lg transition"
+                            >
+                                {category.category}
+                                <ArrowUpRight className={`w-3 h-3 transition-transform ${isCollapsed ? 'rotate-90' : 'rotate-180'}`} />
+                            </button>
+                            
+                            {/* DAFTAR MENU ITEM */}
+                            <ul className={`overflow-hidden transition-all duration-300 ${isCollapsed ? 'max-h-0 opacity-0' : 'max-h-96 opacity-100 mt-1'}`}>
+                                {category.items.map((item) => (
+                                    <li key={item.view}>
+                                        <button
+                                            onClick={() => { setView(item.view); setIsMobileOpen(false); }}
+                                            className={`flex items-center w-full py-2.5 px-3 rounded-lg text-sm transition-colors duration-200 my-0.5 ${currentView === item.view 
+                                                ? 'bg-blue-600 text-white font-semibold shadow-md shadow-blue-200'
+                                                : 'text-gray-700 dark:text-gray-300 hover:bg-blue-50/70 dark:hover:bg-gray-700 hover:text-blue-700 dark:hover:text-blue-400'
+                                                }`}
+                                        >
+                                            <item.icon className="w-5 h-5 mr-3" />
+                                            {item.name}
+                                        </button>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    );
+                })}
+            </nav>
+            
+            {/* FOOTER: Tampilan Peran & Logout */}
+            <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
+                
+                {/* Dark Mode Toggle sebelumnya di sini, sekarang dipindah ke Header */}
+                
+                <div className="p-3 bg-gray-50 dark:bg-gray-700 rounded-xl text-xs border border-gray-200 dark:border-gray-600">
+                    <p className="font-semibold text-gray-700 dark:text-gray-300">Peran:</p>
+                    <p className="text-blue-600 dark:text-blue-400 font-medium truncate">{userRole}</p>
+                    <p className="text-gray-400 text-xs mt-1 truncate">Email: {localVerifiedEmail || 'N/A'}</p> 
+                    
+                    <button 
+                        onClick={onLogout}
+                        className="mt-3 w-full flex items-center justify-center bg-red-600 text-white px-3 py-1.5 rounded-lg hover:bg-red-700 transition text-sm font-semibold" // LOGOUT BUTTON DI PERKECIL (py-1.5)
+                    >
+                        <LogOut className="w-4 h-4 mr-2"/> Logout
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// --- KOMPONEN RIWAYAT PEMBAYARAN SISWA, ETC... (DIHILANGKAN UNTUK KERINGKASAN) ---
+/**
+ * Dashboard Component (Beranda Analitik)
+ */
+const Dashboard = ({ payments, students, cashFlow, fees, setView }) => {
+    const defaultSPP = 150000;
+    const monthlySPP = fees.find(f => f.type === 'SPP Bulanan')?.amount || defaultSPP;
+
+    // 1. Calculate Core Metrics
+    const totalStudents = students.length;
+    const currentMonth = today.getMonth();
+    const currentYear = today.getFullYear();
+
+    const monthlyIncomePayments = payments
+        .filter(p => new Date(p.date).getMonth() === currentMonth && new Date(p.date).getFullYear() === currentYear)
+        .reduce((sum, p) => sum + p.amount, 0);
+
+    const monthlyCashIn = cashFlow
+        .filter(c => c.type === 'Kas Masuk' && new Date(c.date).getMonth() === currentMonth && new Date(c.date).getFullYear() === currentYear)
+        .reduce((sum, c) => sum + c.amount, 0);
+    
+    const monthlyIncome = monthlyIncomePayments + monthlyCashIn;
+
+
+    const potentialIncome = totalStudents * monthlySPP;
+    const monthlyPaymentRatio = (monthlyIncomePayments / potentialIncome * 100).toFixed(1) || 0;
+
+    const totalCashInAllTime = payments.reduce((sum, p) => sum + p.amount, 0) + cashFlow.filter(c => c.type === 'Kas Masuk').reduce((sum, c) => sum + c.amount, 0);
+    const totalCashOutAllTime = cashFlow.filter(c => c.type === 'Kas Keluar').reduce((sum, c) => sum + c.amount, 0);
+    const totalCashBalance = totalCashInAllTime - totalCashOutAllTime;
+
+    // Menghitung Tunggakan (Simple: Siswa yang belum bayar SPP bulan ini)
+    const studentsMonthlyPayment = students.map(student => {
+        const paidThisMonth = payments
+            .filter(p => p.studentId === student.id && new Date(p.date).getMonth() === currentMonth && new Date(p.date).getFullYear() === currentYear)
+            .reduce((sum, p) => sum + p.amount, 0);
+        
+        const arrearAmount = Math.max(0, monthlySPP - paidThisMonth);
+        return {
+            ...student,
+            isArrears: arrearAmount > 0,
+            arrearAmount: arrearAmount,
+        };
+    });
+
+    const activeArrearsCount = studentsMonthlyPayment.filter(s => s.isArrears).length;
+    const totalArrearsAmount = studentsMonthlyPayment.reduce((sum, s) => sum + s.arrearAmount, 0);
+
+    // 2. Prepare Data for Chart (Last 6 Months Trend)
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 5);
+
+    const monthlyData = useMemo(() => {
+        const data = {};
+        for (let i = 0; i < 6; i++) {
+            const date = new Date(sixMonthsAgo);
+            date.setMonth(sixMonthsAgo.getMonth() + i);
+            const key = `${date.getFullYear()}-${date.getMonth()}`;
+            data[key] = { label: date.toLocaleString('id-ID', { month: 'short' }), income: 0, expense: 0 };
+        }
+
+        // Combine all income sources: payments & general cash-in
+        payments.forEach(p => {
+            const date = new Date(p.date);
+            const key = `${date.getFullYear()}-${date.getMonth()}`;
+            if (data[key]) data[key].income += p.amount;
+        });
+        cashFlow.forEach(c => {
+            const date = new Date(c.date);
+            const key = `${date.getFullYear()}-${date.getMonth()}`;
+            if (c.type === 'Kas Masuk' && data[key]) data[key].income += c.amount;
+            if (c.type === 'Kas Keluar' && data[key]) data[key].expense += c.amount;
+        });
+
+        return Object.values(data);
+    }, [payments, cashFlow]);
+
+    // 3. Chart Rendering Effect
+    useEffect(() => {
+        const ctx = document.getElementById('incomeTrendChart');
+        if (!ctx) return;
+
+        const existingChart = Chart.getChart('incomeTrendChart');
+        if (existingChart) existingChart.destroy();
+
+        new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: monthlyData.map(d => d.label),
+                datasets: [
+                    {
+                        label: 'Total Pemasukan',
+                        data: monthlyData.map(d => d.income),
+                        backgroundColor: '#3B82F6', 
+                        borderRadius: 4,
+                    },
+                    {
+                        label: 'Total Pengeluaran',
+                        data: monthlyData.map(d => d.expense),
+                        backgroundColor: '#EF4444', 
+                        borderRadius: 4,
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: 'top', labels: { color: document.documentElement.classList.contains('dark') ? '#CCC' : '#333' } },
+                    title: { display: true, text: 'Tren Arus Kas (6 Bulan Terakhir)', font: { size: 14, color: document.documentElement.classList.contains('dark') ? '#DDD' : '#333' } }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        ticks: { callback: function(value) { return formatRupiah(value); }, color: document.documentElement.classList.contains('dark') ? '#AAA' : '#666' },
+                        grid: { color: document.documentElement.classList.contains('dark') ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)' }
+                    },
+                    x: { stacked: true, ticks: { color: document.documentElement.classList.contains('dark') ? '#AAA' : '#666' }, grid: { color: document.documentElement.classList.contains('dark') ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)' } } 
+                }
+            }
+        });
+    }, [monthlyData]);
+
+    // Card component local to dashboard for a professional look
+    // Penyesuaian: Mengurangi ukuran font dan padding di kartu dashboard (PRESISI)
+    const DashboardCard = ({ title, value, icon: Icon, color, metric, linkText, linkIcon: LinkIcon, onClick }) => (
+        <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-lg transition duration-300 hover:shadow-xl border border-gray-100 dark:border-gray-700 flex flex-col justify-between h-full">
+            <div>
+                <div className={`p-2 rounded-lg inline-flex mb-2 ${color.bg} ${color.text}`}>
+                    <Icon className="w-5 h-5" />
+                </div>
+                <p className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">{title}</p>
+                <h3 className="mt-0.5 text-2xl font-extrabold text-gray-900 dark:text-white truncate">{value}</h3>
+                <p className="mt-2 text-xs text-gray-400 font-semibold truncate">{metric}</p>
+            </div>
+            <button onClick={onClick} className="mt-3 w-full text-xs text-blue-600 dark:text-blue-400 font-semibold flex items-center hover:text-blue-800 dark:hover:text-blue-300 transition">
+                {linkText} <LinkIcon className="w-3 h-3 ml-1" />
+            </button>
+        </div>
+    );
+
+    return (
+        <div className="space-y-8">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                <DashboardCard
+                    title="Total Siswa Aktif"
+                    value={totalStudents.toLocaleString('id-ID')}
+                    icon={Users}
+                    color={{ bg: 'bg-blue-100', text: 'text-blue-700' }}
+                    metric={`Tahun Ajaran ${currentYear}/${currentYear + 1}`}
+                    linkText="Lihat Data Siswa"
+                    linkIcon={ArrowUpRight}
+                    onClick={() => setView('students')}
+                />
+                <DashboardCard
+                    title="Penerimaan Kotor Bulan Ini"
+                    value={formatRupiah(monthlyIncome)}
+                    icon={TrendingUp}
+                    color={{ bg: 'bg-emerald-100', text: 'text-emerald-700' }}
+                    metric={`Rasio Kolektibilitas SPP: ${monthlyPaymentRatio}%`}
+                    linkText="Input Pembayaran Baru"
+                    linkIcon={CreditCard}
+                    onClick={() => setView('payments')}
+                />
+                <DashboardCard
+                    title="Piutang Aktif Bulan Ini"
+                    value={`${activeArrearsCount.toLocaleString('id-ID')} Siswa`}
+                    icon={Clock}
+                    color={{ bg: 'bg-orange-100', text: 'text-orange-700' }}
+                    metric={`Total Tunggakan: ${formatRupiah(totalArrearsAmount)}`}
+                    linkText="Lihat Laporan Piutang"
+                    linkIcon={BarChart}
+                    onClick={() => setView('arrears')}
+                />
+                <DashboardCard
+                    title="Saldo Kas Total"
+                    value={formatRupiah(totalCashBalance)}
+                    icon={DollarSign}
+                    color={{ bg: 'bg-purple-100', text: 'text-purple-700' }}
+                    metric={`Total Pemasukan: ${formatRupiah(totalCashInAllTime)}`}
+                    linkText="Lihat Laporan Cashflow"
+                    linkIcon={FileText}
+                    onClick={() => setView('reports')}
+                />
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div className="lg:col-span-2 bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700">
+                    <h3 className="text-xl font-bold text-gray-800 dark:text-white mb-6">Analisis Arus Kas Gabungan</h3>
+                    <div className="h-96">
+                        <canvas id="incomeTrendChart"></canvas>
+                    </div>
+                </div>
+
+                <div className="lg:col-span-1 bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700">
+                    <h3 className="text-xl font-bold text-gray-800 dark:text-white mb-6">Akses Cepat Transaksi </h3>
+                    <div className="space-y-4">
+                        <button onClick={() => setView('students')} className="w-full flex items-center justify-between p-4 bg-blue-600 text-white rounded-xl shadow-md hover:bg-blue-700 transition">
+                            <span className="font-semibold flex items-center"><UserPlus className="w-5 h-5 mr-2" /> Registrasi Siswa Baru</span>
+                            <ArrowUpRight className="w-4 h-4" />
+                        </button>
+                        <button onClick={() => setView('cashflow')} className="w-full flex items-center justify-between p-4 bg-emerald-600 text-white rounded-xl shadow-md hover:bg-emerald-700 transition">
+                            <span className="font-semibold flex items-center"><FilePlus className="w-5 h-5 mr-2" /> Catat Kas Masuk Umum</span>
+                            <ArrowUpRight className="w-4 h-4" />
+                        </button>
+                        <button onClick={() => setView('cashflow')} className="w-full flex items-center justify-between p-4 bg-red-600 text-white rounded-xl shadow-md hover:bg-red-700 transition">
+                            <span className="font-semibold flex items-center"><FileMinus className="w-5 h-5 mr-2" /> Catat Kas Keluar Umum</span>
+                            <ArrowDownRight className="w-4 h-4" />
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+/**
+ * Payment Wizard Component (Paling Canggih: Multi-step Guided UX)
+ */
+const PaymentWizard = ({ students, payments, fees, userRole }) => {
+    const isAllowed = userRole === ROLES.ADMIN_KEUANGAN || userRole === ROLES.TATA_USAHA;
+    const defaultSPP = fees.find(f => f.type === 'SPP Bulanan')?.amount || 150000;
+    
+    const [step, setStep] = useState(1);
+    const [selectedClass, setSelectedClass] = useState(''); // New state for class selection
+    const [selectedStudentId, setSelectedStudentId] = useState(''); // New state for student ID selection
+    const [selectedStudent, setSelectedStudent] = useState(null);
+    const [paymentData, setPaymentData] = useState({ month: today.getMonth() + 1, year: today.getFullYear(), amount: defaultSPP, type: 'SPP Bulanan', method: 'Tunai' });
+    const [message, setMessage] = useState(null);
+    const [isSubmitting, setIsSubmitting] = useState(false);
+
+    // List of unique classes for dropdown
+    const availableClasses = useMemo(() => {
+        const classes = [...new Set(students.map(s => s.class))].sort();
+        return classes.filter(c => c); // Filter out empty or null classes
+    }, [students]);
+
+    // List of students filtered by selectedClass
+    const studentsInSelectedClass = useMemo(() => {
+        return students.filter(s => s.class === selectedClass).sort((a, b) => a.name.localeCompare(b.name));
+    }, [students, selectedClass]);
+
+    // MAP Biaya untuk Otomatisasi Jumlah Bayar
+    const feeMap = useMemo(() => {
+        const map = {};
+        fees.forEach(fee => {
+            map[fee.name] = fee.amount;
+        });
+        return map;
+    }, [fees]);
+
+    // useEffect untuk Otomatisasi Jumlah Bayar berdasarkan Jenis Pembayaran
+    useEffect(() => {
+        const newAmount = feeMap[paymentData.type] || 0;
+        setPaymentData(prev => ({ ...prev, amount: newAmount }));
+    }, [paymentData.type, feeMap]); // Dipicu saat jenis pembayaran berubah
+
+    const resetWizard = () => {
+        setStep(1);
+        setSelectedClass('');
+        setSelectedStudentId('');
+        setSelectedStudent(null);
+        setPaymentData({ month: today.getMonth() + 1, year: today.getFullYear(), amount: defaultSPP, type: 'SPP Bulanan', method: 'Tunai' });
+        setMessage(null);
+        setIsSubmitting(false);
+    };
+
+    const handleStudentSelect = () => {
+        const student = students.find(s => s.id === selectedStudentId);
+        if (student) {
+            setSelectedStudent(student);
+            // Tetapkan default amount berdasarkan tipe default 'SPP Bulanan'
+            const defaultAmount = feeMap['SPP Bulanan'] || defaultSPP;
+            setPaymentData(prev => ({ ...prev, amount: defaultAmount })); 
+            setStep(2);
+        } else {
+            setMessage({ type: 'error', text: 'Siswa tidak ditemukan.' });
+        }
+    };
+
+    const handlePaymentSubmit = async () => {
+        if (!isAllowed || !selectedStudent || paymentData.amount <= 0) {
+            setMessage({ type: 'error', text: 'Data pembayaran tidak valid.' });
+            return;
+        }
+
+        // --- Pencegahan Transaksi Ganda (Duplicate Check) ---
+        const existingPayment = payments.find(p => 
+            p.studentId === selectedStudent.id &&
+            p.month === Number(paymentData.month) &&
+            p.year === Number(paymentData.year) &&
+            p.type === paymentData.type
+        );
+
+        if (existingPayment) {
+            setMessage({ type: 'error', text: `ERROR: Transaksi ganda terdeteksi! Siswa ini sudah membayar ${paymentData.type} untuk periode ${paymentData.month}/${paymentData.year}.` });
+            setIsSubmitting(false);
+            return;
+        }
+        // --------------------------------------------------
+
+        setIsSubmitting(true);
+        try {
+            await addDoc(collection(db, getCollectionPath('payments')), {
+                studentId: selectedStudent.id,
+                studentName: selectedStudent.name,
+                className: selectedStudent.class,
+                nis: selectedStudent.nis,
+                amount: Number(paymentData.amount),
+                month: Number(paymentData.month),
+                year: Number(paymentData.year),
+                type: paymentData.type,
+                method: paymentData.method,
+                date: new Date().toISOString(),
+                recordedBy: auth.currentUser?.uid,
+            });
+            setMessage({ type: 'success', text: `Pembayaran ${formatRupiah(paymentData.amount)} untuk ${selectedStudent.name} berhasil dicatat.` });
+            setStep(3); // Go to success step
+        } catch (e) {
+            console.error("Error recording payment: ", e);
+            setMessage({ type: 'error', text: 'Gagal mencatat pembayaran. Cek konsol untuk detail error.' });
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    // Step 1: Class & Student Selection
+    const Step1 = () => (
+        <div className="space-y-6">
+            <h4 className="text-lg font-semibold text-gray-700 dark:text-gray-300">1. Pilih Siswa (Kelas & Nama)</h4>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-1">
+                    <label className="text-sm font-medium text-gray-600 dark:text-gray-400">Pilih Kelas</label>
+                    <select
+                        value={selectedClass}
+                        onChange={(e) => { setSelectedClass(e.target.value); setSelectedStudentId(''); }}
+                        className="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-xl focus:ring-blue-500 focus:border-blue-500 transition"
+                        disabled={!isAllowed}
+                    >
+                        <option value="" disabled>-- Pilih Kelas --</option>
+                        {availableClasses.map(cls => (
+                            <option key={cls} value={cls}>{cls}</option>
+                        ))}
+                    </select>
+                </div>
+                
+                <div className="space-y-1">
+                    <label className="text-sm font-medium text-gray-600 dark:text-gray-400">Pilih Nama Siswa</label>
+                    <select
+                        value={selectedStudentId}
+                        onChange={(e) => setSelectedStudentId(e.target.value)}
+                        className="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-xl focus:ring-blue-500 focus:border-blue-500 transition"
+                        disabled={!isAllowed || !selectedClass || studentsInSelectedClass.length === 0}
+                    >
+                        <option value="" disabled>-- Pilih Siswa --</option>
+                        {studentsInSelectedClass.map(s => (
+                            <option key={s.id} value={s.id}>{s.name} ({s.nis})</option>
+                        ))}
+                    </select>
+                    {!selectedClass && <p className="text-xs text-red-500 mt-1">Pilih kelas terlebih dahulu.</p>}
+                </div>
+            </div>
+
+            <button
+                onClick={handleStudentSelect}
+                className={`w-full text-white px-4 py-3 rounded-xl shadow-md transition duration-200 ${selectedStudentId && isAllowed ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 cursor-not-allowed'}`}
+                disabled={!isAllowed || !selectedStudentId}
+            >
+                Lanjut ke Pembayaran <ArrowUpRight className="w-4 h-4 ml-2 inline-block" />
+            </button>
+        </div>
+    );
+
+    // Step 2: Payment Details
+    const Step2 = () => {
+        const studentPayments = payments.filter(p => p.studentId === selectedStudent?.id);
+        const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+
+        const paymentStatus = months.map((monthName, index) => {
+            const m = index + 1;
+            const paidAmount = studentPayments.filter(p => p.month === m && p.year === paymentData.year).reduce((sum, p) => sum + p.amount, 0);
+            const status = paidAmount >= defaultSPP ? 'Lunas' : 'Tunggak';
+            return { monthName, paidAmount, status };
+        });
+
+        // Daftar nama biaya dari master fees + item "Lainnya"
+        const feeOptions = fees.map(fee => fee.name);
+        if (!feeOptions.includes("Lainnya")) {
+            feeOptions.push("Lainnya");
+        }
+
+
+        return (
+            <div className="space-y-6">
+                <h4 className="text-lg font-semibold text-gray-700 dark:text-gray-300">2. Detail Transaksi untuk {selectedStudent.name} ({selectedStudent.class})</h4>
+                
+                <div className="p-4 bg-gray-50 dark:bg-gray-700 rounded-xl border border-gray-200 dark:border-gray-600">
+                    <p className="font-bold text-gray-800 dark:text-white">Status Pembayaran SPP Tahun Ini:</p>
+                    <div className="grid grid-cols-4 gap-2 mt-2">
+                        {paymentStatus.map(status => (
+                            <div key={status.monthName} className={`p-2 rounded-lg text-center text-xs font-semibold ${status.status === 'Lunas' ? 'bg-emerald-200 dark:bg-emerald-800 text-emerald-800 dark:text-emerald-200' : 'bg-red-200 dark:bg-red-800 text-red-800 dark:text-red-200'}`}>
+                                {status.monthName}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                        <label className="text-sm font-medium text-gray-600 dark:text-gray-400">Jenis Pembayaran</label>
+                        <select 
+                            name="type" 
+                            value={paymentData.type} 
+                            onChange={(e) => setPaymentData({...paymentData, type: e.target.value})} 
+                            className="w-full px-4 py-3 border rounded-xl dark:bg-gray-700 dark:border-gray-600 dark:text-white" 
+                            disabled={!isAllowed}
+                        >
+                            {feeOptions.map(name => (
+                                <option key={name} value={name}>
+                                    {name} {feeMap[name] > 0 ? `(${formatRupiah(feeMap[name])})` : ''}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+                    <div className="space-y-1">
+                        <label className="text-sm font-medium text-gray-600 dark:text-gray-400">Metode</label>
+                        <select name="method" value={paymentData.method} onChange={(e) => setPaymentData({...paymentData, method: e.target.value})} className="w-full px-4 py-3 border rounded-xl dark:bg-gray-700 dark:border-gray-600 dark:text-white" disabled={!isAllowed}>
+                            <option>Tunai</option>
+                            <option>Transfer Bank</option>
+                            <option>Pembayaran Digital (QRIS/E-Wallet)</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <div className="grid grid-cols-3 gap-4">
+                    <div className="space-y-1">
+                        <label className="text-sm font-medium text-gray-600 dark:text-gray-400">Bulan</label>
+                        <input type="number" name="month" min="1" max="12" value={paymentData.month} onChange={(e) => setPaymentData({...paymentData, month: e.target.value})} required className="w-full px-4 py-3 border rounded-xl dark:bg-gray-700 dark:border-gray-600 dark:text-white" disabled={!isAllowed} />
+                    </div>
+                    <div className="space-y-1">
+                        <label className="text-sm font-medium text-gray-600 dark:text-gray-400">Tahun</label>
+                        <input type="number" name="year" value={paymentData.year} onChange={(e) => setPaymentData({...paymentData, year: e.target.value})} required className="w-full px-4 py-3 border rounded-xl dark:bg-gray-700 dark:border-gray-600 dark:text-white" disabled={!isAllowed} />
+                    </div>
+                    <div className="space-y-1">
+                        <label className="text-sm font-medium text-gray-600 dark:text-gray-400">Jumlah Bayar (Rp)</label>
+                        <input 
+                            type="number" 
+                            name="amount" 
+                            value={paymentData.amount} 
+                            onChange={(e) => setPaymentData({...paymentData, amount: e.target.value})} 
+                            required 
+                            className="w-full px-4 py-3 border rounded-xl dark:bg-gray-700 dark:border-gray-600 dark:text-white" 
+                            disabled={!isAllowed || (feeMap[paymentData.type] > 0 && paymentData.type !== 'Lainnya')} // Nonaktif jika ada harga tetap dan bukan 'Lainnya'
+                        />
+                        {(feeMap[paymentData.type] > 0 && paymentData.type !== 'Lainnya') && 
+                            <p className="text-xs text-blue-500 mt-1">Otomatis dari Master Biaya</p>}
+                        {(paymentData.type === 'Lainnya') && 
+                            <p className="text-xs text-orange-500 mt-1">Isi jumlah bayar secara manual.</p>}
+                    </div>
+                </div>
+
+                <div className="flex justify-between space-x-3 pt-4">
+                    <button onClick={() => setStep(1)} className="bg-gray-300 dark:bg-gray-600 text-gray-800 dark:text-white px-4 py-3 rounded-xl hover:bg-gray-400 dark:hover:bg-gray-700 transition duration-200">
+                        <ArrowUpRight className="w-4 h-4 mr-2 inline-block transform rotate-180" /> Kembali
+                    </button>
+                    <button
+                        onClick={handlePaymentSubmit}
+                        className={`text-white px-4 py-3 rounded-xl shadow-lg transition duration-200 flex items-center ${isSubmitting ? 'bg-blue-400 cursor-wait' : 'bg-emerald-600 hover:bg-emerald-700'}`}
+                        disabled={isSubmitting}
+                    >
+                        {isSubmitting ? <Loader className="w-5 h-5 mr-2 animate-spin" /> : <CreditCard className="w-5 h-5 mr-2" />}
+                        {isSubmitting ? 'Konfirmasi & Catat' : 'Konfirmasi & Catat'}
+                    </button>
+                </div>
+            </div>
+        );
+    };
+
+    // Step 3: Success Confirmation
+    const Step3 = () => (
+        <div className="text-center p-8 space-y-4">
+            <Check className="w-16 h-16 text-emerald-500 mx-auto bg-emerald-50 p-2 rounded-full" />
+            <h4 className="2xl font-bold text-gray-800 dark:text-white">Transaksi Berhasil!</h4>
+            <p className="text-gray-600 dark:text-gray-400">Pembayaran telah berhasil dicatat dalam sistem SIM Keuangan.</p>
+            <p className="text-xl font-extrabold text-blue-700 dark:text-blue-400">{formatRupiah(paymentData.amount)}</p>
+            <div className="flex justify-center space-x-4 pt-4">
+                <button onClick={resetWizard} className="bg-blue-600 text-white px-6 py-3 rounded-xl hover:bg-blue-700 transition">
+                    Input Pembayaran Baru
+                </button>
+            </div>
+        </div>
+    );
+
+    return (
+        <div className="space-y-6">
+            <div className="bg-white dark:bg-gray-800 p-8 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700">
+                {message && (
+                    <div className={`p-4 rounded-xl font-medium flex justify-between items-center mb-6 ${message.type === 'success' ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' : message.type === 'error' ? 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300' : 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300'}`}>
+                        {message.text}
+                        <button onClick={() => setMessage(null)}><X className="w-5 h-5" /></button>
+                    </div>
+                )}
+                
+                {step === 1 && <Step1 />}
+                {step === 2 && selectedStudent && <Step2 />}
+                {step === 3 && <Step3 />}
+
+                {!isAllowed && (
+                    <div className="p-4 bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300 rounded-xl mt-4">Akses Read-Only. Hanya Admin Keuangan dan Tata Usaha yang diizinkan melakukan transaksi.</div>
+                )}
+            </div>
+        </div>
+    );
+};
+
+/**
+ * Student Management Component (Lebih Terstruktur)
+ */
+const StudentManagement = ({ students, userRole }) => {
+    const isAllowedToEdit = userRole === ROLES.ADMIN_KEUANGAN; // Hanya Admin yang bisa CRUD
+    const [isFormModalOpen, setIsFormModalOpen] = useState(false); // Modal untuk input manual/edit
+    const [isImportModalOpen, setIsImportModalOpen] = useState(false); // Modal untuk import
+    const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false); // Modal untuk konfirmasi delete
+    const [studentToEdit, setStudentToEdit] = useState(null); // Data siswa yang sedang di edit
+    const [studentToDelete, setStudentToDelete] = useState(null); // Data siswa yang akan dihapus
+    const [newStudent, setNewStudent] = useState({ name: '', class: '7A', nis: '', parent: '', contact: '', status: 'Aktif' });
+    const [searchTerm, setSearchTerm] = useState('');
+    const [filterClass, setFilterClass] = useState('Semua');
+    const [message, setMessage] = useState(null); 
+
+    const classes = ['Semua', '7A', '7B', '8A', '8B', '9A', '9B'];
+    
+    // Fungsi Reset Form
+    const resetForm = () => {
+        setNewStudent({ name: '', class: '7A', nis: '', parent: '', contact: '', status: 'Aktif' });
+        setStudentToEdit(null);
+    };
+
+    // FUNGSI UTAMA: Tambah atau Edit Siswa
+    const handleSaveStudent = async (e) => {
+        e.preventDefault();
+        if (!isAllowedToEdit) { console.error("Permission Denied"); return; }
+        
+        try {
+            if (studentToEdit) {
+                // LOGIC UPDATE (EDIT)
+                const studentRef = doc(db, getCollectionPath('students'), studentToEdit.id);
+                await updateDoc(studentRef, {
+                    name: newStudent.name,
+                    class: newStudent.class,
+                    nis: newStudent.nis,
+                    parent: newStudent.parent,
+                    contact: newStudent.contact,
+                    status: newStudent.status,
+                    updatedAt: new Date().toISOString(),
+                });
+                setMessage({ type: 'success', text: `Data siswa ${newStudent.name} berhasil diperbarui.` });
+
+            } else {
+                // LOGIC ADD (BARU)
+                await addDoc(collection(db, getCollectionPath('students')), {
+                    ...newStudent,
+                    createdAt: new Date().toISOString(),
+                });
+                setMessage({ type: 'success', text: 'Siswa baru berhasil ditambahkan.' });
+            }
+            
+            resetForm();
+            setIsFormModalOpen(false);
+        } catch (e) {
+            console.error("Error saving document: ", e);
+            setMessage({ type: 'error', text: `Gagal menyimpan siswa: ${e.message}` });
+        }
+    };
+    
+    // FUNGSI EDIT
+    const handleEdit = (student) => {
+        if (!isAllowedToEdit) { setMessage({ type: 'error', text: 'Akses Ditolak: Hanya Admin Keuangan yang dapat mengedit.' }); return; }
+        setNewStudent(student);
+        setStudentToEdit(student);
+        setIsFormModalOpen(true);
+    };
+
+    // FUNGSI DELETE (MEMBUKA MODAL KONFIRMASI)
+    const handleDelete = (student) => {
+        if (!isAllowedToEdit) { setMessage({ type: 'error', text: 'Akses Ditolak: Hanya Admin Keuangan yang dapat menghapus.' }); return; }
+        setStudentToDelete(student);
+        setIsDeleteModalOpen(true);
+    };
+
+    // FUNGSI KONFIRMASI DELETE
+    const confirmDelete = async () => {
+        if (!isAllowedToEdit || !studentToDelete) return;
+        
+        try {
+            await deleteDoc(doc(db, getCollectionPath('students'), studentToDelete.id));
+            setMessage({ type: 'success', text: `Siswa ${studentToDelete.name} berhasil dihapus.` });
+        } catch (e) {
+            console.error("Error deleting document: ", e);
+            setMessage({ type: 'error', text: 'Gagal menghapus siswa.' });
+        } finally {
+            setStudentToDelete(null);
+            setIsDeleteModalOpen(false);
+        }
+    };
+
+
+    const handleSearchAndFilter = (student) => {
+        const matchesSearch = student.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+            student.nis.includes(searchTerm);
+        const matchesClass = filterClass === 'Semua' || student.class === filterClass;
+        return matchesSearch && matchesClass;
+    };
+    
+    // PERBAIKAN: Menggunakan useMemo untuk filter dan sorting
+    const filteredAndSortedStudents = useMemo(() => {
+        let list = students.filter(handleSearchAndFilter);
+
+        // Sorting: Utama berdasarkan Kelas, Kedua berdasarkan Nama
+        list.sort((a, b) => {
+            if (a.class < b.class) return -1;
+            if (a.class > b.class) return 1;
+            
+            // Secondary sort by Name
+            if (a.name < b.name) return -1;
+            if (a.name > b.name) return 1;
+            return 0;
+        });
+
+        return list;
+    }, [students, searchTerm, filterClass]);
+
+
+    const exportTemplate = () => {
+        const headers = ["NIS", "Nama", "Kelas", "Wali", "Kontak", "Status"];
+        const templateData = [
+            { NIS: '1001', Nama: 'Ahmad Deni', Kelas: '7A', Wali: 'Bapak Budi', Kontak: '0812xxxxxx', Status: 'Aktif' }
+        ];
+        if (exportToCSV(templateData, `template_import_siswa.csv`)) {
+            setMessage({ type: 'success', text: 'Template CSV Import (pemisah ";") berhasil diunduh.' });
+        } else {
+            setMessage({ type: 'error', text: 'Gagal mengunduh template. Coba lagi.' });
+        }
+    };
+    
+    const exportData = () => {
+        const dataToExport = filteredAndSortedStudents.map(s => ({
+            NIS: s.nis,
+            Nama: s.name,
+            Kelas: s.class,
+            Wali: s.parent,
+            Kontak: s.contact,
+            Status: s.status,
+            'Tanggal Dibuat': new Date(s.createdAt).toLocaleDateString('id-ID'),
+        }));
+        
+        if (dataToExport.length === 0) {
+            setMessage({ type: 'warning', text: 'Tidak ada data siswa untuk diexport berdasarkan filter saat ini.' });
+            return;
+        }
+
+        if (exportToCSV(dataToExport, `data_siswa_smp_muh7_${new Date().toISOString().substring(0, 10)}.csv`)) {
+            setMessage({ type: 'success', text: 'Data siswa berhasil diexport ke CSV.' });
+        } else {
+             setMessage({ type: 'error', text: 'Gagal mengunduh data siswa. Coba lagi.' });
+        }
+    };
+
+    // --- KOMPONEN BARU: MODAL IMPORT DATA SISWA ---
+    const ImportStudentModal = () => {
+        const [file, setFile] = useState(null);
+        const [isParsing, setIsParsing] = useState(false);
+        const [uploadMessage, setUploadMessage] = useState(null);
+
+        const expectedHeaders = ["NIS", "Nama", "Kelas", "Wali", "Kontak", "Status"];
+
+        const handleFileChange = (e) => {
+            setFile(e.target.files[0]);
+            setUploadMessage(null);
+        };
+
+        const handleImport = () => {
+            if (!file) {
+                setUploadMessage({ type: 'error', text: 'Pilih file CSV terlebih dahulu.' });
+                return;
+            }
+            setIsParsing(true);
+            setUploadMessage(null);
+
+            const reader = new FileReader();
+            reader.onload = async (event) => {
+                const text = event.target.result;
+                const rows = text.trim().split('\n');
+                const delimiter = rows[0].includes(';') ? ';' : ','; 
+
+                // Parse header and data
+                const headers = rows[0].trim().split(delimiter).map(h => h.trim().replace(/"/g, ''));
+                let successCount = 0;
+                let failCount = 0;
+                const studentsToImport = [];
+
+                // Cek kesesuaian header
+                const headerCheck = expectedHeaders.every(h => headers.includes(h));
+                if (!headerCheck) {
+                    setIsParsing(false);
+                    setUploadMessage({ type: 'error', text: `Header file tidak sesuai. Harusnya: ${expectedHeaders.join(', ')}` });
+                    return;
+                }
+
+                // Proses baris data (mulai dari indeks 1)
+                for (let i = 1; i < rows.length; i++) {
+                    const line = rows[i].trim();
+                    if (!line) continue;
+                    
+                    const values = line.split(delimiter).map(v => v.trim().replace(/"/g, ''));
+                    const studentData = {};
+
+                    if (values.length === headers.length) {
+                         // Map data ke objek
+                        headers.forEach((header, index) => {
+                            studentData[header.toLowerCase().replace(/\s/g, '')] = values[index];
+                        });
+
+                        // Basic Validation
+                        if (studentData.nis && studentData.nama && studentData.kelas) {
+                            studentsToImport.push({
+                                name: studentData.nama,
+                                class: studentData.kelas,
+                                nis: studentData.nis,
+                                parent: studentData.wali || '',
+                                contact: studentData.kontak || '',
+                                status: studentData.status || 'Aktif',
+                                createdAt: new Date().toISOString(),
+                            });
+                            successCount++;
+                        } else {
+                            failCount++;
+                        }
+                    } else {
+                        failCount++;
+                    }
+                }
+                
+                // Masukkan data ke Firestore
+                if (studentsToImport.length > 0) {
+                    try {
+                        for (const student of studentsToImport) {
+                            await addDoc(collection(db, getCollectionPath('students')), student);
+                        }
+                        setUploadMessage({ type: 'success', text: `${studentsToImport.length} data siswa berhasil diimpor. (${failCount} baris diabaikan).` });
+                    } catch (e) {
+                         setUploadMessage({ type: 'error', text: 'Gagal menyimpan data ke Firestore. Cek konsol.' });
+                         console.error("Firestore Import Error:", e);
+                    }
+                } else {
+                    setUploadMessage({ type: 'warning', text: 'Tidak ada data valid yang ditemukan untuk diimpor.' });
+                }
+
+                setIsParsing(false);
+                setFile(null);
+            };
+
+            reader.onerror = () => {
+                setIsParsing(false);
+                setUploadMessage({ type: 'error', text: 'Gagal membaca file.' });
+            };
+
+            reader.readAsText(file);
+        };
+
+        return (
+            <Modal isOpen={isImportModalOpen} onClose={() => { setIsImportModalOpen(false); setUploadMessage(null); }} title="Import Data Siswa Massal" maxWidth="max-w-xl">
+                <div className="space-y-4">
+                    <div className="p-3 bg-blue-50 border-l-4 border-blue-400 text-sm text-blue-800 rounded">
+                        Pastikan file Anda berformat CSV dengan pemisah **titik koma (;)** atau **koma (,)** dan memiliki header: {expectedHeaders.join(', ')}.
+                    </div>
+
+                    {uploadMessage && (
+                        <div className={`p-4 rounded-xl font-medium flex justify-between items-center ${uploadMessage.type === 'success' ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' : uploadMessage.type === 'warning' ? 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300' : 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300'}`}>
+                            {uploadMessage.text}
+                            <button onClick={() => setUploadMessage(null)}><X className="w-5 h-5" /></button>
+                        </div>
+                    )}
+                    
+                    <div className="border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-6 text-center">
+                        <input
+                            type="file"
+                            accept=".csv, .txt"
+                            onChange={handleFileChange}
+                            className="hidden"
+                            id="csv-upload"
+                            disabled={isParsing}
+                        />
+                        <label htmlFor="csv-upload" className="cursor-pointer inline-flex items-center text-blue-600 dark:text-blue-400 hover:text-blue-800 font-semibold">
+                            <Upload className="w-5 h-5 mr-2" />
+                            {file ? file.name : 'Pilih File CSV Siswa (.csv / .txt)'}
+                        </label>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">Maksimal 1MB. Gunakan template yang sudah disediakan.</p>
+                    </div>
+
+                    <div className="flex justify-between space-x-3 pt-4">
+                         <button 
+                            type="button" 
+                            onClick={exportTemplate} 
+                            className="text-gray-700 dark:text-gray-300 px-4 py-2 rounded-xl shadow-md transition duration-200 text-sm font-semibold border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"
+                            disabled={isParsing}
+                         >
+                            <Download className="w-4 h-4 mr-2 inline-block" /> Download Template
+                        </button>
+                        <button
+                            onClick={handleImport}
+                            className={`text-white px-4 py-3 rounded-xl shadow-lg transition duration-200 flex items-center ${isParsing ? 'bg-blue-400 cursor-wait' : file ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 cursor-not-allowed'}`}
+                            disabled={isParsing || !file}
+                        >
+                            {isParsing ? <Loader className="w-5 h-5 mr-2 animate-spin" /> : <Upload className="w-5 h-5 mr-2" />}
+                            {isParsing ? 'Memproses...' : 'Mulai Import'}
+                        </button>
+                    </div>
+                </div>
+            </Modal>
+        );
+    };
+    // --- AKHIR KOMPONEN MODAL IMPORT DATA SISWA ---
+
+    // Komponen Modal Konfirmasi Delete
+    const DeleteConfirmationModal = () => (
+        <Modal 
+            isOpen={isDeleteModalOpen} 
+            onClose={() => setIsDeleteModalOpen(false)} 
+            title="Konfirmasi Penghapusan Data" 
+            maxWidth="max-w-sm"
+        >
+            <div className="text-center p-4">
+                <Trash2 className="w-12 h-12 text-red-500 mx-auto mb-4" />
+                <p className="text-gray-700 dark:text-gray-300">
+                    Apakah Anda yakin ingin menghapus data siswa **{studentToDelete?.name}**? 
+                    Tindakan ini tidak dapat dibatalkan.
+                </p>
+                <div className="flex justify-center space-x-4 mt-6">
+                    <button 
+                        onClick={() => setIsDeleteModalOpen(false)} 
+                        className="bg-gray-300 dark:bg-gray-600 text-gray-800 dark:text-white px-4 py-2 rounded-xl hover:bg-gray-400 dark:hover:bg-gray-700 transition"
+                    >
+                        Batal
+                    </button>
+                    <button 
+                        onClick={confirmDelete} 
+                        className="bg-red-600 text-white px-4 py-2 rounded-xl hover:bg-red-700 transition"
+                    >
+                        Ya, Hapus Permanen
+                    </button>
+                </div>
+            </div>
+        </Modal>
+    );
+
+    return (
+        <div className="space-y-6">
+            <ImportStudentModal /> 
+            <DeleteConfirmationModal /> {/* Tambahkan modal delete */}
+            
+            <div className="flex justify-between items-center flex-wrap gap-4">
+                {/* H2 title dipindahkan ke PageHeader, namun dibiarkan di sini untuk kasus non-header */}
+                <h2 className="text-3xl font-bold text-gray-800 dark:text-white">Manajemen Siswa</h2>
+                {isAllowedToEdit && (
+                    <button
+                        onClick={() => { resetForm(); setIsFormModalOpen(true); }} // Reset form sebelum buka modal
+                        className="flex items-center bg-blue-600 text-white px-4 py-2 rounded-xl shadow-md hover:bg-blue-700 transition duration-200 font-semibold"
+                    >
+                        <User className="w-5 h-5 mr-2" /> Tambah Siswa Manual
+                    </button>
+                )}
+                {/* Display role for read-only users */}
+                {!isAllowedToEdit && (
+                     <div className="text-sm text-gray-500 dark:text-gray-400 p-2 bg-gray-100 dark:bg-gray-700 rounded-lg">Akses: Read Only ({userRole})</div>
+                )}
+            </div>
+            
+            {/* Display message */}
+            {message && (
+                <div className={`p-4 rounded-xl font-medium flex justify-between items-center ${message.type === 'success' ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' : message.type === 'warning' ? 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300' : 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300'}`}>
+                    {message.text}
+                    <button onClick={() => setMessage(null)}><X className="w-5 h-5" /></button>
+                </div>
+            )}
+
+            <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700">
+                <div className="flex flex-col md:flex-row gap-4 mb-6 items-center">
+                    <div className="relative flex-1 w-full">
+                        <Search className="w-5 h-5 absolute left-3 top-3 text-gray-400 dark:text-gray-500" />
+                        <input
+                            type="text"
+                            placeholder="Cari Siswa (Nama/NIS)..."
+                            value={searchTerm}
+                            onChange={(e) => setSearchTerm(e.target.value)}
+                            className="w-full pl-10 pr-4 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-xl focus:ring-blue-500 focus:border-blue-500"
+                        />
+                    </div>
+                    <select
+                        value={filterClass}
+                        onChange={(e) => setFilterClass(e.target.value)}
+                        className="w-full md:w-40 px-4 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-xl focus:ring-blue-500 focus:border-blue-500"
+                    >
+                        {classes.map(cls => (
+                            <option key={cls} value={cls}>Kelas {cls}</option>
+                        ))}
+                    </select>
+                    
+                    <button
+                        onClick={exportData}
+                        disabled={filteredAndSortedStudents.length === 0}
+                        className={`flex items-center text-white px-4 py-2 rounded-xl shadow-md transition duration-200 text-sm font-semibold ${filteredAndSortedStudents.length > 0 ? 'bg-emerald-500 hover:bg-emerald-600' : 'bg-gray-400 cursor-not-allowed'}`}
+                    >
+                        <Download className="w-5 h-5 mr-2" /> Export Data ({filteredAndSortedStudents.length})
+                    </button>
+
+                    {isAllowedToEdit && (
+                        <button
+                            onClick={() => setIsImportModalOpen(true)} // Mengganti aksi tombol untuk membuka modal import
+                            className="flex items-center text-gray-700 dark:text-gray-300 px-4 py-2 rounded-xl shadow-md transition duration-200 text-sm font-semibold border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"
+                        >
+                            <Upload className="w-5 h-5 mr-2" /> Import Data
+                        </button>
+                    )}
+                </div>
+
+                {/* Students Table */}
+                <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                        <thead className="bg-gray-50 dark:bg-gray-700">
+                            <tr>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">NIS</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Nama Siswa</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Kelas</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Wali Murid</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Kontak</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Status</th>
+                                {isAllowedToEdit && <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Aksi</th>}
+                            </tr>
+                        </thead>
+                        <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                            {filteredAndSortedStudents.length > 0 ? filteredAndSortedStudents.map((student) => (
+                                <tr key={student.id} className="hover:bg-blue-50/50 dark:hover:bg-gray-700">
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">{student.nis}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">{student.name}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">{student.class}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">{student.parent}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">{student.contact}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap">
+                                        <StatusBadge type={student.status === 'Aktif' ? 'success' : 'error'}>
+                                            {student.status}
+                                        </StatusBadge>
+                                    </td>
+                                    {isAllowedToEdit && (
+                                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
+                                            <button 
+                                                onClick={() => handleEdit(student)}
+                                                className="text-blue-600 hover:text-blue-800 text-xs font-semibold"
+                                            >
+                                                Edit
+                                            </button>
+                                            <button 
+                                                onClick={() => handleDelete(student)}
+                                                className="text-red-600 hover:text-red-800 text-xs font-semibold"
+                                            >
+                                                Hapus
+                                            </button>
+                                        </td>
+                                    )}
+                                </tr>
+                            )) : (
+                                <tr>
+                                    <td colSpan={isAllowedToEdit ? "7" : "6"} className="text-center py-10 text-gray-500 italic dark:text-gray-400">Data siswa tidak ditemukan.</td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            {/* Modal for Add/Edit Student (Manual Input) */}
+            <Modal 
+                isOpen={isFormModalOpen} 
+                onClose={() => { setIsFormModalOpen(false); resetForm(); }} 
+                title={studentToEdit ? `Edit Data Siswa: ${studentToEdit.name}` : "Formulir Siswa Baru"}
+            >
+                <form onSubmit={handleSaveStudent} className="space-y-4">
+                    <input type="text" name="name" placeholder="Nama Siswa" value={newStudent.name} onChange={(e) => setNewStudent({...newStudent, name: e.target.value})} required className="w-full px-4 py-2 border rounded-lg focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white" />
+                    <input type="text" name="nis" placeholder="NIS (NIS harus unik)" value={newStudent.nis} onChange={(e) => setNewStudent({...newStudent, nis: e.target.value})} required className="w-full px-4 py-2 border rounded-lg focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white" />
+                    <select name="class" value={newStudent.class} onChange={(e) => setNewStudent({...newStudent, class: e.target.value})} required className="w-full px-4 py-2 border rounded-lg focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white">
+                        {classes.filter(c => c !== 'Semua').map(cls => (
+                            <option key={cls} value={cls}>Kelas {cls}</option>
+                        ))}
+                    </select>
+                    <input type="text" name="parent" placeholder="Nama Orang Tua/Wali" value={newStudent.parent} onChange={(e) => setNewStudent({...newStudent, parent: e.target.value})} required className="w-full px-4 py-2 border rounded-lg focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white" />
+                    <input type="text" name="contact" placeholder="Kontak Wali (c/o: 0812xxxx)" value={newStudent.contact} onChange={(e) => setNewStudent({...newStudent, contact: e.target.value})} required className="w-full px-4 py-2 border rounded-lg focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white" />
+                    <select name="status" value={newStudent.status} onChange={(e) => setNewStudent({...newStudent, status: e.target.value})} required className="w-full px-4 py-2 border rounded-lg focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white">
+                        <option value="Aktif">Aktif</option>
+                        <option value="Nonaktif">Nonaktif</option>
+                        <option value="Mutasi">Mutasi</option>
+                    </select>
+                    <div className="flex justify-end space-x-3 pt-4">
+                        <button type="button" onClick={() => { setIsFormModalOpen(false); resetForm(); }} className="bg-gray-300 dark:bg-gray-600 text-gray-800 dark:text-white px-4 py-2 rounded-xl hover:bg-gray-400 dark:hover:bg-gray-700 transition duration-200">Batal</button>
+                        <button type="submit" className="bg-blue-600 text-white px-4 py-2 rounded-xl hover:bg-blue-700 transition duration-200">
+                            {studentToEdit ? 'Perbarui Data' : 'Simpan Siswa'}
+                        </button>
+                    </div>
+                </form>
+            </Modal>
+        </div>
+    );
+};
+
+/**
+ * Fees Management Component (Master Biaya)
+ */
+const FeesManagement = ({ fees, userRole }) => {
+    const isAllowedToEdit = userRole === ROLES.ADMIN_KEUANGAN; // Hanya Admin yang bisa CRUD
+    const [isModalOpen, setIsModalOpen] = useState(false);
+    const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false); // Modal Delete
+    const [feeToEdit, setFeeToEdit] = useState(null); // Biaya yang akan diedit
+    const [feeToDelete, setFeeToDelete] = useState(null); // Biaya yang akan dihapus
+    const [newFee, setNewFee] = useState({ name: '', amount: 0, type: 'SPP Bulanan' });
+    const [message, setMessage] = useState(null);
+
+    const resetForm = () => {
+        setNewFee({ name: '', amount: 0, type: 'SPP Bulanan' });
+        setFeeToEdit(null);
+    };
+
+    // FUNGSI UTAMA: Tambah atau Edit Biaya
+    const handleSaveFee = async (e) => {
+        e.preventDefault();
+        if (!isAllowedToEdit) { setMessage({ type: 'error', text: 'Akses Ditolak: Hanya Admin Keuangan yang dapat menambah biaya.' }); return; }
+        if (newFee.amount <= 0 || !newFee.name) { setMessage({ type: 'error', text: 'Nama dan Jumlah Biaya harus diisi.' }); return; }
+
+        try {
+            if (feeToEdit) {
+                // LOGIC UPDATE (EDIT)
+                const feeRef = doc(db, getCollectionPath('fees'), feeToEdit.id);
+                await updateDoc(feeRef, {
+                    name: newFee.name,
+                    amount: Number(newFee.amount),
+                    type: newFee.type,
+                });
+                setMessage({ type: 'success', text: `Biaya '${newFee.name}' berhasil diperbarui.` });
+            } else {
+                // LOGIC ADD (BARU)
+                await addDoc(collection(db, getCollectionPath('fees')), {
+                    ...newFee,
+                    amount: Number(newFee.amount),
+                    createdAt: new Date().toISOString(),
+                });
+                setMessage({ type: 'success', text: `Biaya '${newFee.name}' berhasil ditambahkan.` });
+            }
+            
+            resetForm();
+            setIsModalOpen(false);
+        } catch (e) {
+            console.error("Error saving fee: ", e);
+            setMessage({ type: 'error', text: 'Gagal menyimpan biaya.' });
+        }
+    };
+    
+    // FUNGSI EDIT
+    const handleEdit = (fee) => {
+        if (!isAllowedToEdit) { setMessage({ type: 'error', text: 'Akses Ditolak: Hanya Admin Keuangan yang dapat mengedit biaya.' }); return; }
+        setNewFee(fee);
+        setFeeToEdit(fee);
+        setIsModalOpen(true);
+    };
+
+    // FUNGSI DELETE (MEMBUKA MODAL KONFIRMASI)
+    const handleDelete = (fee) => {
+        if (!isAllowedToEdit) { setMessage({ type: 'error', text: 'Akses Ditolak: Hanya Admin Keuangan yang dapat menghapus biaya.' }); return; }
+        setFeeToDelete(fee);
+        setIsDeleteModalOpen(true);
+    };
+
+    // FUNGSI KONFIRMASI DELETE
+    const confirmDelete = async () => {
+        if (!isAllowedToEdit || !feeToDelete) return;
+        
+        try {
+            await deleteDoc(doc(db, getCollectionPath('fees'), feeToDelete.id));
+            setMessage({ type: 'success', text: `Biaya '${feeToDelete.name}' berhasil dihapus.` });
+        } catch (e) {
+            console.error("Error deleting fee: ", e);
+            setMessage({ type: 'error', text: 'Gagal menghapus biaya.' });
+        } finally {
+            setFeeToDelete(null);
+            setIsDeleteModalOpen(false);
+        }
+    };
+
+    // Komponen Modal Konfirmasi Delete
+    const DeleteConfirmationModal = () => (
+        <Modal 
+            isOpen={isDeleteModalOpen} 
+            onClose={() => setIsDeleteModalOpen(false)} 
+            title="Konfirmasi Penghapusan Biaya" 
+            maxWidth="max-w-sm"
+        >
+            <div className="text-center p-4">
+                <Trash2 className="w-12 h-12 text-red-500 mx-auto mb-4" />
+                <p className="text-gray-700 dark:text-gray-300">
+                    Apakah Anda yakin ingin menghapus biaya **{feeToDelete?.name}** ({formatRupiah(feeToDelete?.amount)})? 
+                    Tindakan ini akan mempengaruhi semua perhitungan piutang.
+                </p>
+                <div className="flex justify-center space-x-4 mt-6">
+                    <button 
+                        onClick={() => setIsDeleteModalOpen(false)} 
+                        className="bg-gray-300 dark:bg-gray-600 text-gray-800 dark:text-white px-4 py-2 rounded-xl hover:bg-gray-400 dark:hover:bg-gray-700 transition"
+                    >
+                        Batal
+                    </button>
+                    <button 
+                        onClick={confirmDelete} 
+                        className="bg-red-600 text-white px-4 py-2 rounded-xl hover:bg-red-700 transition"
+                    >
+                        Ya, Hapus Permanen
+                    </button>
+                </div>
+            </div>
+        </Modal>
+    );
+
+
+    return (
+        <div className="space-y-6">
+            <DeleteConfirmationModal />
+            <div className="flex justify-between items-center flex-wrap gap-4">
+                <h2 className="text-3xl font-bold text-gray-800 dark:text-white">Manajemen Master Biaya</h2>
+                {isAllowedToEdit && (
+                    <button
+                        onClick={() => { resetForm(); setIsModalOpen(true); }}
+                        className="flex items-center bg-blue-600 text-white px-4 py-2 rounded-xl shadow-md hover:bg-blue-700 transition duration-200 font-semibold"
+                    >
+                        <Settings className="w-5 h-5 mr-2" /> Tambah Item Biaya
+                    </button>
+                )}
+                {!isAllowedToEdit && (
+                     <div className="text-sm text-gray-500 dark:text-gray-400 p-2 bg-gray-100 dark:bg-gray-700 rounded-lg">Akses: Read Only ({userRole})</div>
+                )}
+            </div>
+            {message && <div className={`p-4 rounded-xl font-medium flex justify-between items-center mb-6 ${message.type === 'success' ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' : 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300'}`}>{message.text}<button onClick={() => setMessage(null)}><X className="w-5 h-5" /></button></div>}
+
+            <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700">
+                <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                        <thead className="bg-gray-50 dark:bg-gray-700">
+                            <tr>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Nama Biaya</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Tipe</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Jumlah (Rp)</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Aksi</th>
+                            </tr>
+                        </thead>
+                        <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                            {fees.length > 0 ? fees.map((fee) => (
+                                <tr key={fee.id} className="hover:bg-blue-50/50 dark:hover:bg-gray-700">
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">{fee.name}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">{fee.type}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300 font-semibold">{formatRupiah(fee.amount)}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-3">
+                                        {isAllowedToEdit ? (
+                                            <>
+                                                <button onClick={() => handleEdit(fee)} className="text-blue-600 hover:text-blue-800 text-xs font-semibold">
+                                                    Edit
+                                                </button>
+                                                <button onClick={() => handleDelete(fee)} className="text-red-600 hover:text-red-800 text-xs font-semibold">
+                                                    Hapus
+                                                </button>
+                                            </>
+                                        ) : <span className="text-gray-400 text-xs">Read Only</span>}
+                                    </td>
+                                </tr>
+                            )) : (
+                                <tr>
+                                    <td colSpan="4" className="text-center py-10 text-gray-500 dark:text-gray-400 italic">Belum ada biaya master yang dicatat.</td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <Modal 
+                isOpen={isModalOpen} 
+                onClose={() => { setIsModalOpen(false); resetForm(); }} 
+                title={feeToEdit ? "Edit Item Biaya" : "Tambah Item Biaya Baru"}
+            >
+                <form onSubmit={handleSaveFee} className="space-y-4">
+                    <input type="text" placeholder="Nama Biaya (Contoh: SPP Kelas 7)" value={newFee.name} onChange={(e) => setNewFee({...newFee, name: e.target.value})} required className="w-full px-4 py-2 border rounded-lg focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white" />
+                    <input type="number" placeholder="Jumlah (Rp)" value={newFee.amount} onChange={(e) => setNewFee({...newFee, amount: e.target.value})} required className="w-full px-4 py-2 border rounded-lg focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white" min="0"/>
+                    <select value={newFee.type} onChange={(e) => setNewFee({...newFee, type: e.target.value})} required className="w-full px-4 py-2 border rounded-lg focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white">
+                        <option>SPP Bulanan</option>
+                        <option>Biaya Non-SPP (Kegiatan)</option>
+                        <option>Biaya Pendaftaran</option>
+                        <option>Biaya Lain</option>
+                    </select>
+
+                    <div className="flex justify-end space-x-3 pt-4">
+                        <button type="button" onClick={() => { setIsModalOpen(false); resetForm(); }} className="bg-gray-300 dark:bg-gray-600 text-gray-800 dark:text-white px-4 py-2 rounded-xl hover:bg-gray-400 dark:hover:bg-gray-700 transition duration-200">Batal</button>
+                        <button type="submit" className="bg-blue-600 text-white px-4 py-2 rounded-xl hover:bg-blue-700 transition duration-200">
+                            {feeToEdit ? 'Perbarui Biaya' : 'Simpan Biaya'}
+                        </button>
+                    </div>
+                </form>
+            </Modal>
+        </div>
+    );
+};
+
+/**
+ * CashFlow Management Component
+ */
+
+const cashFlowCategories = {
+    'Kas Masuk': ['Donasi', 'Penjualan Kantin', 'Sewa Aset', 'Pengembalian Kasbon', 'Lainnya Pemasukan'], // Tambah Pengembalian Kasbon
+    'Kas Keluar': ['Gaji Pegawai', 'Biaya Listrik & Air', 'Pembelian ATK', 'Perbaikan Aset', 'Kasbon', 'Lainnya Pengeluaran'] // Tambah Kasbon
+};
+
+const CashFlowManagement = ({ cashFlow, userRole }) => {
+    const isAllowedToEdit = userRole === ROLES.ADMIN_KEUANGAN; // Hanya Admin yang bisa CRUD
+    const [isModalOpen, setIsModalOpen] = useState(false);
+    const [isKasKeluar, setIsKasKeluar] = useState(false);
+    const [filterMonth, setFilterMonth] = useState(today.getMonth() + 1); // Default bulan sekarang
+    const [filterYear, setFilterYear] = useState(today.getFullYear()); // Default tahun sekarang
+
+    const [newTransaction, setNewTransaction] = useState({ 
+        amount: 0, 
+        description: '', 
+        type: 'Kas Masuk', 
+        category: 'Donasi', 
+        date: new Date().toISOString().substring(0, 10) 
+    });
+    const [message, setMessage] = useState(null);
+
+    const handleTypeChange = (type) => {
+        setIsKasKeluar(type === 'Kas Keluar');
+        setNewTransaction(prev => ({ 
+            ...prev, 
+            type: type, 
+            category: cashFlowCategories[type][0] // Set default category for the new type
+        }));
+    };
+
+    const addTransaction = async (e) => {
+        e.preventDefault();
+        if (!isAllowedToEdit) { setMessage({ type: 'error', text: 'Akses Ditolak: Hanya Admin Keuangan yang dapat menambah transaksi kas.' }); return; }
+        if (newTransaction.amount <= 0) { setMessage({ type: 'error', text: 'Jumlah harus lebih besar dari nol.' }); return; }
+
+        try {
+            await addDoc(collection(db, getCollectionPath('cashflow')), {
+                ...newTransaction,
+                amount: Number(newTransaction.amount),
+                date: new Date(newTransaction.date).toISOString(), // Ensure ISO format
+                recordedBy: auth.currentUser?.uid,
+            });
+            setMessage({ type: 'success', text: `Transaksi ${newTransaction.type} sebesar ${formatRupiah(newTransaction.amount)} berhasil dicatat.` });
+            setNewTransaction({ amount: 0, description: '', type: 'Kas Masuk', category: 'Donasi', date: new Date().toISOString().substring(0, 10) });
+            setIsModalOpen(false);
+        } catch (e) {
+            console.error("Error adding transaction: ", e);
+            setMessage({ type: 'error', text: 'Gagal mencatat transaksi.' });
+        }
+    };
+    
+    // Daftar Tahun yang tersedia dari data cashFlow
+    const availableYears = useMemo(() => {
+        const years = new Set(cashFlow.map(tx => new Date(tx.date).getFullYear()));
+        if (!years.has(today.getFullYear())) years.add(today.getFullYear());
+        return [...years].sort((a, b) => b - a);
+    }, [cashFlow]);
+
+
+    // Filter CashFlow berdasarkan Bulan dan Tahun
+    const filteredCashFlow = useMemo(() => {
+        return cashFlow
+            .filter(tx => {
+                const date = new Date(tx.date);
+                const txMonth = date.getMonth() + 1;
+                const txYear = date.getFullYear();
+
+                return txMonth === filterMonth && txYear === filterYear;
+            })
+            .sort((a, b) => new Date(b.date) - new Date(a.date)); // Sort by date descending
+    }, [cashFlow, filterMonth, filterYear]);
+    
+    // --- FUNGSI DOWNLOAD BARU UNTUK CASHFLOW ---
+    const exportData = () => {
+        const dataToExport = filteredCashFlow.map(tx => ({
+            Tanggal: new Date(tx.date).toLocaleDateString('id-ID'),
+            Tipe: tx.type,
+            Kategori: tx.category,
+            Deskripsi: tx.description,
+            Jumlah: tx.amount,
+        }));
+        
+        if (dataToExport.length === 0) {
+            setMessage({ type: 'warning', text: 'Tidak ada data Kas Umum untuk diexport berdasarkan filter ini.' });
+            return;
+        }
+
+        const monthName = new Date(filterYear, filterMonth - 1).toLocaleString('id-ID', { month: 'long' });
+        const filename = `riwayat_kas_umum_${monthName}_${filterYear}.csv`;
+
+        if (exportToCSV(dataToExport, filename)) {
+            setMessage({ type: 'success', text: 'Riwayat Kas Umum berhasil diexport ke Excel (CSV).' });
+        } else {
+             setMessage({ type: 'error', text: 'Gagal mengunduh riwayat Kas Umum. Coba lagi.' });
+        }
+    };
+    // ---------------------------------------------
+
+    // FUNGSI DELETE (Simulasi dengan modal konfirmasi)
+    const handleDelete = (tx) => {
+        if (!isAllowedToEdit) { setMessage({ type: 'error', text: 'Akses Ditolak: Hanya Admin Keuangan yang dapat menghapus transaksi kas.' }); return; }
+        alert(`Konfirmasi Hapus: Apakah Anda yakin ingin menghapus transaksi ${tx.type} senilai ${formatRupiah(tx.amount)}?`);
+        // Di sini seharusnya ada modal konfirmasi dan logic deleteDoc
+    };
+
+
+    return (
+        <div className="space-y-6">
+            <h2 className="text-3xl font-bold text-gray-800 dark:text-white">Manajemen Kas Sekolah (Umum)</h2>
+
+            <div className="flex justify-between items-center flex-wrap gap-4">
+                <div className="flex gap-4 items-center">
+                    {/* Filter Bulan */}
+                    <select
+                        value={filterMonth}
+                        onChange={(e) => setFilterMonth(Number(e.target.value))}
+                        className="px-4 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-xl focus:ring-blue-500 focus:border-blue-500"
+                    >
+                        {Array.from({ length: 12 }, (_, i) => i + 1).map(m => (
+                            <option key={m} value={m}>
+                                {new Date(filterYear, m - 1).toLocaleString('id-ID', { month: 'long' })}
+                            </option>
+                        ))}
+                    </select>
+
+                    {/* Filter Tahun */}
+                    <select
+                        value={filterYear}
+                        onChange={(e) => setFilterYear(Number(e.target.value))}
+                        className="px-4 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-xl focus:ring-blue-500 focus:border-blue-500"
+                    >
+                        {availableYears.map(y => (
+                            <option key={y} value={y}>{y}</option>
+                        ))}
+                    </select>
+                </div>
+
+                <div className="flex gap-4">
+                    {isAllowedToEdit && (
+                        <>
+                            <button
+                                onClick={() => { handleTypeChange('Kas Masuk'); setIsModalOpen(true); }}
+                                className="flex items-center bg-emerald-600 text-white px-4 py-2 rounded-xl shadow-md hover:bg-emerald-700 transition duration-200 font-semibold"
+                            >
+                                <FilePlus className="w-5 h-5 mr-2" /> Catat Kas Masuk
+                            </button>
+                            <button
+                                onClick={() => { handleTypeChange('Kas Keluar'); setIsModalOpen(true); }}
+                                className="flex items-center bg-red-600 text-white px-4 py-2 rounded-xl shadow-md hover:bg-red-700 transition duration-200 font-semibold"
+                            >
+                                <FileMinus className="w-5 h-5 mr-2" /> Catat Kas Keluar
+                            </button>
+                        </>
+                    )}
+                    {!isAllowedToEdit && (
+                        <div className="text-sm text-gray-500 dark:text-gray-400 p-2 bg-gray-100 dark:bg-gray-700 rounded-lg">Akses: Read Only ({userRole})</div>
+                    )}
+                </div>
+            </div>
+
+            {message && <div className={`p-4 rounded-xl font-medium flex justify-between items-center mb-6 ${message.type === 'success' ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' : 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300'}`}>{message.text}<button onClick={() => setMessage(null)}><X className="w-5 h-5" /></button></div>}
+
+            <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700">
+                <div className="flex justify-between items-center mb-4">
+                    <h3 className="text-xl font-bold text-gray-800 dark:text-white">Riwayat Transaksi Kas Non-SPP</h3>
+                    {/* TOMBOL DOWNLOAD CASHFLOW */}
+                    <button
+                        onClick={exportData}
+                        disabled={filteredCashFlow.length === 0}
+                        className={`flex items-center text-white px-4 py-2 rounded-xl shadow-md transition duration-200 text-sm font-semibold ${filteredCashFlow.length > 0 ? 'bg-purple-600 hover:bg-purple-700' : 'bg-gray-400 cursor-not-allowed'}`}
+                    >
+                        <Download className="w-5 h-5 mr-2" /> Export Kas Umum ({filteredCashFlow.length})
+                    </button>
+                    {/* END TOMBOL DOWNLOAD */}
+                </div>
+                <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                        <thead className="bg-gray-50 dark:bg-gray-700">
+                            <tr>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Tanggal</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Deskripsi</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Kategori</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Tipe</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Jumlah (Rp)</th>
+                                {isAllowedToEdit && <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Aksi</th>}
+                            </tr>
+                        </thead>
+                        <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                            {filteredCashFlow.length > 0 ? filteredCashFlow.map((tx) => (
+                                <tr key={tx.id} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">{new Date(tx.date).toLocaleDateString('id-ID')}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">{tx.description}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">{tx.category}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap">
+                                        <StatusBadge type={tx.type === 'Kas Masuk' ? 'success' : 'error'}>
+                                            {tx.type}
+                                        </StatusBadge>
+                                    </td>
+                                    <td className={`px-6 py-4 whitespace-nowrap text-sm text-right font-bold ${tx.type === 'Kas Masuk' ? 'text-emerald-600' : 'text-red-600'}`}>
+                                        {formatRupiah(tx.amount)}
+                                    </td>
+                                    {isAllowedToEdit && (
+                                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
+                                            <button 
+                                                // Simulasi Delete Kas Umum
+                                                onClick={() => handleDelete(tx)}
+                                                className="text-red-600 hover:text-red-800 text-xs font-semibold"
+                                            >
+                                                Hapus
+                                            </button>
+                                        </td>
+                                    )}
+                                </tr>
+                            )) : (
+                                <tr>
+                                    <td colSpan={isAllowedToEdit ? "6" : "5"} className="text-center py-10 text-gray-500 dark:text-gray-400 italic">Tidak ada transaksi kas umum yang dicatat untuk bulan ini.</td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            {/* Modal for Add Transaction */}
+            <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title={`Catat ${newTransaction.type}`}>
+                <form onSubmit={addTransaction} className="space-y-4">
+                    <div className="space-y-1">
+                        <label className="text-sm font-medium text-gray-600 dark:text-gray-400">Tanggal</label>
+                        <input 
+                            type="date" 
+                            value={newTransaction.date} 
+                            onChange={(e) => setNewTransaction({...newTransaction, date: e.target.value})} 
+                            required 
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white" 
+                        />
+                    </div>
+                    <div className="space-y-1">
+                        <label className="text-sm font-medium text-gray-600 dark:text-gray-400">Kategori {newTransaction.type}</label>
+                        <select 
+                            value={newTransaction.category} 
+                            onChange={(e) => setNewTransaction({...newTransaction, category: e.target.value})} 
+                            required 
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                        >
+                            {cashFlowCategories[newTransaction.type].map(cat => (
+                                <option key={cat} value={cat}>{cat}</option>
+                            ))}
+                        </select>
+                    </div>
+                    <div className="space-y-1">
+                        <label className="text-sm font-medium text-gray-600 dark:text-gray-400">Deskripsi/Keterangan</label>
+                        <input 
+                            type="text" 
+                            placeholder={`Contoh: ${isKasKeluar ? 'Pembelian ATK bulan ini' : 'Donasi Bapak Kepala Sekolah'}`} 
+                            value={newTransaction.description} 
+                            onChange={(e) => setNewTransaction({...newTransaction, description: e.target.value})} 
+                            required 
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white" 
+                        />
+                    </div>
+                    <div className="space-y-1">
+                        <label className="text-sm font-medium text-gray-600 dark:text-gray-400">Jumlah {newTransaction.type} (Rp)</label>
+                        <input 
+                            type="number" 
+                            placeholder="0" 
+                            min="1"
+                            value={newTransaction.amount} 
+                            onChange={(e) => setNewTransaction({...newTransaction, amount: e.target.value})} 
+                            required 
+                            className="w-full px-4 py-2 border rounded-lg focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white" 
+                        />
+                    </div>
+                    
+                    <div className="flex justify-end space-x-3 pt-4">
+                        <button type="button" onClick={() => setIsModalOpen(false)} className="bg-gray-300 dark:bg-gray-600 text-gray-800 dark:text-white px-4 py-2 rounded-xl hover:bg-gray-400 dark:hover:bg-gray-700 transition duration-200">Batal</button>
+                        <button type="submit" className={`text-white px-4 py-2 rounded-xl transition duration-200 font-semibold ${isKasKeluar ? 'bg-red-600 hover:bg-red-700' : 'bg-emerald-600 hover:bg-emerald-700'}`}>
+                            Catat Transaksi
+                        </button>
+                    </div>
+                </form>
+            </Modal>
+        </div>
+    );
+};
+
+
+// --- KOMPONEN PIUTANG, LAPORAN UMUM, PENGATURAN... (DIHILANGKAN UNTUK KERINGKASAN) ---
+const ArrearsReport = ({ students, payments, fees, userRole }) => {
+    const isAllowed = userRole === ROLES.ADMIN_KEUANGAN || userRole === ROLES.KEPALA_SEKOLAH;
+    const defaultSPP = fees.find(f => f.type === 'SPP Bulanan')?.amount || 150000;
+    const [filterClass, setFilterClass] = useState('Semua');
+    const classes = ['Semua', '7A', '7B', '8A', '8B', '9A', '9B'];
+    const [message, setMessage] = useState(null); // Tambahkan state pesan lokal
+
+    // 1. Core Logic: Calculate Arrears per Student
+    const arrearsData = useMemo(() => {
+        if (!students.length || !defaultSPP) return [];
+
+        let list = students
+            .filter(s => filterClass === 'Semua' || s.class === filterClass)
+            .map(student => {
+                const totalPaid = payments
+                    .filter(p => p.studentId === student.id && p.type === 'SPP Bulanan')
+                    .reduce((sum, p) => sum + p.amount, 0);
+
+                // Asumsi: Semua siswa harus membayar 12 bulan SPP (1 tahun ajaran)
+                const totalRequired = defaultSPP * 12; 
+                const totalArrears = Math.max(0, totalRequired - totalPaid);
+
+                // --- Simulasi Umur Piutang (Aging Logic) ---
+                // Ini adalah simulasi yang disederhanakan berdasarkan total tunggakan
+                const buckets = {
+                    '30_days': 0, // 1 bulan
+                    '60_days': 0, // 2 bulan
+                    '90_days': 0, // 3 bulan
+                    'over_90': 0, // > 3 bulan
+                    total: totalArrears
+                };
+
+                let remainingArrears = totalArrears;
+                const monthlyArrear = defaultSPP;
+
+                if (remainingArrears >= 3 * monthlyArrear) {
+                    buckets['over_90'] = remainingArrears - (3 * monthlyArrear); // Sisanya
+                    remainingArrears -= buckets['over_90']; 
+                }
+                
+                if (remainingArrears >= monthlyArrear) {
+                    // Isi tunggakan 90 hari (3 bulan)
+                    if (remainingArrears >= 2 * monthlyArrear) {
+                         buckets['90_days'] = monthlyArrear;
+                         buckets['60_days'] = monthlyArrear;
+                         buckets['30_days'] = monthlyArrear;
+                    } else if (remainingArrears >= monthlyArrear) {
+                        buckets['30_days'] = monthlyArrear;
+                        buckets['60_days'] = remainingArrears - monthlyArrear;
+                    }
+
+                }
+
+                return {
+                    id: student.id,
+                    nis: student.nis,
+                    name: student.name,
+                    class: student.class,
+                    totalArrears: totalArrears,
+                    buckets: buckets
+                };
+            }).filter(d => d.totalArrears > 0);
+            
+        // --- NEW SORTING LOGIC: Class > Name ---
+        list.sort((a, b) => {
+            // 1. Sort by Class (primary)
+            if (a.class < b.class) return -1;
+            if (a.class > b.class) return 1;
+            
+            // 2. Sort by Name (secondary)
+            return a.name.localeCompare(b.name);
+        });
+
+        return list;
+    }, [students, payments, fees, filterClass, defaultSPP]);
+
+    // 2. Summary Calculation
+    const summary = useMemo(() => {
+        const initial = { totalStudentsArrears: arrearsData.length, total: 0, b30: 0, b60: 0, b90: 0, bOver90: 0 };
+        return arrearsData.reduce((acc, data) => {
+            acc.total += data.totalArrears;
+            acc.b30 += data.buckets['30_days'];
+            acc.b60 += data.buckets['60_days'];
+            acc.b90 += data.buckets['90_days'];
+            acc.bOver90 += data.buckets['over_90'];
+            return acc;
+        }, initial);
+    }, [arrearsData]);
+
+
+    if (!isAllowed) {
+        return <div className="p-8 bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300 rounded-xl shadow-lg border border-red-200 dark:border-red-700"><h2 className="text-2xl font-bold mb-4">Akses Ditolak</h2><p>Anda tidak memiliki izin untuk melihat Laporan Piutang.</p></div>;
+    }
+
+    const exportArrearsData = () => {
+        const dataToExport = arrearsData.map(d => ({
+            NIS: d.nis,
+            Nama: d.name,
+            Kelas: d.class,
+            Tunggakan_Total: d.totalArrears,
+            '1-30_Hari': d.buckets['30_days'],
+            '31-60_Hari': d.buckets['60_days'],
+            '61-90_Hari': d.buckets['90_days'],
+            '>90_Hari': d.buckets['over_90'],
+        }));
+        
+        if (dataToExport.length === 0) {
+            setMessage({ type: 'warning', text: 'Tidak ada data piutang/tunggakan untuk diexport.' });
+            return;
+        }
+
+        if (exportToCSV(dataToExport, `laporan_piutang_${filterClass}_${new Date().toISOString().substring(0, 10)}.csv`)) {
+            setMessage({ type: 'success', text: 'Laporan piutang berhasil diexport ke Excel (CSV).' });
+        } else {
+             setMessage({ type: 'error', text: 'Gagal mengunduh laporan piutang. Coba lagi.' });
+        }
+    };
+
+    return (
+        <div className="space-y-6">
+            <h2 className="text-3xl font-bold text-gray-800 dark:text-white">Laporan Analisis Umur Piutang (Aging Report)</h2>
+            
+            {/* Display message */}
+            {message && (
+                <div className={`p-4 rounded-xl font-medium flex justify-between items-center mb-6 ${message.type === 'success' ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' : message.type === 'warning' ? 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300' : 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300'}`}>
+                    {message.text}
+                    <button onClick={() => setMessage(null)}><X className="w-5 h-5" /></button>
+                </div>
+            )}
+
+
+            {/* Summary Cards */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-md border-l-4 border-blue-500 dark:border-blue-700">
+                    <p className="text-sm text-gray-500 dark:text-gray-400">Total Siswa Menunggak</p>
+                    <h3 className="text-2xl font-bold text-blue-800 dark:text-blue-400">{summary.totalStudentsArrears} Siswa</h3>
+                </div>
+                <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-md border-l-4 border-orange-500 dark:border-orange-700">
+                    <p className="text-sm text-gray-500 dark:text-gray-400">Total Piutang SPP</p>
+                    <h3 className="text-2xl font-bold text-orange-800 dark:text-orange-400">{formatRupiah(summary.total)}</h3>
+                </div>
+                <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-md border-l-4 border-emerald-500 dark:border-emerald-700">
+                    <p className="text-sm text-gray-500 dark:text-gray-400">Piutang Lancar (1-30 Hari)</p>
+                    <h3 className="2xl font-bold text-emerald-800 dark:text-emerald-400">{formatRupiah(summary.b30)}</h3>
+                </div>
+                <div className="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-md border-l-4 border-red-500 dark:border-red-700">
+                    <p className="text-sm text-gray-500 dark:text-gray-400">Piutang Macet {'>'} 90 Hari</p>
+                    <h3 className="text-2xl font-bold text-red-800 dark:text-red-400">{formatRupiah(summary.bOver90)}</h3>
+                </div>
+            </div>
+
+            <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700">
+                <div className="flex flex-col md:flex-row justify-between items-center gap-4 mb-6">
+                    <h3 className="text-xl font-bold text-gray-800 dark:text-white">Detail Tunggakan per Siswa</h3>
+                    <div className="flex gap-3">
+                        <select
+                            value={filterClass}
+                            onChange={(e) => setFilterClass(e.target.value)}
+                            className="px-4 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-xl focus:ring-blue-500 focus:border-blue-500"
+                        >
+                            {classes.map(cls => (
+                                <option key={cls} value={cls}>Filter Kelas {cls}</option>
+                            ))}
+                        </select>
+                        <button
+                            onClick={exportArrearsData}
+                            disabled={arrearsData.length === 0}
+                            className={`flex items-center text-white px-4 py-2 rounded-xl shadow-md transition duration-200 text-sm font-semibold ${arrearsData.length > 0 ? 'bg-purple-600 hover:bg-purple-700' : 'bg-gray-400 cursor-not-allowed'}`}
+                        >
+                            <Download className="w-5 h-5 mr-2" /> Export Excel ({arrearsData.length})
+                        </button>
+                    </div>
+                </div>
+
+                {/* Arrears Table */}
+                <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+                    <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                        <thead className="bg-gray-50 dark:bg-gray-700 sticky-header">
+                            <tr>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">NIS / Nama Siswa</th>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Kelas</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Total Tunggakan</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">1 - 30 Hari</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">31 - 60 Hari</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">61 - 90 Hari</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">{'>'} 90 Hari</th>
+                            </tr>
+                        </thead>
+                        <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                            {arrearsData.length > 0 ? arrearsData.map((data) => (
+                                <tr key={data.id} className="hover:bg-orange-50/50 dark:hover:bg-gray-700">
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">
+                                        {data.nis} - {data.name}
+                                    </td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">{data.class}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-red-600 dark:text-red-400 text-right">
+                                        {formatRupiah(data.totalArrears)}
+                                    </td>
+                                    {['30_days', '60_days', '90_days', 'over_90'].map(bucket => (
+                                        <td key={bucket} className={`px-6 py-4 whitespace-nowrap text-sm text-right ${data.buckets[bucket] > 0 ? 'font-semibold' : 'text-gray-400'}`}>
+                                            {formatRupiah(data.buckets[bucket])}
+                                        </td>
+                                    ))}
+                                </tr>
+                            )) : (
+                                <tr>
+                                    <td colSpan="7" className="text-center py-10 text-gray-500 dark:text-gray-400 italic">Semua siswa lancar, tidak ada piutang yang tercatat.</td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// --- KOMPONEN RIWAYAT PEMBAYARAN SISWA ---
+const StudentPaymentHistory = ({ students, payments, userRole }) => {
+    const isAllowedToEdit = userRole === ROLES.ADMIN_KEUANGAN || userRole === ROLES.TATA_USAHA; // Hanya Admin/TU yang bisa Hapus
+    const [filterType, setFilterType] = useState('Semua');
+    const [message, setMessage] = useState(null);
+    const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+    const [transactionToDelete, setTransactionToDelete] = useState(null);
+
+    // Dapatkan semua jenis pembayaran unik
+    const paymentTypes = useMemo(() => {
+        const types = [...new Set(payments.map(p => p.type))].sort();
+        return ['Semua', ...types];
+    }, [payments]);
+
+    // 1. Logic untuk filter dan pengurutan (Single Table)
+    const filteredAndSortedPayments = useMemo(() => {
+        const studentMap = new Map(students.map(s => [s.id, s]));
+        
+        let list = payments.map(p => {
+            const student = studentMap.get(p.studentId);
+            return {
+                ...p,
+                studentName: student?.name || 'N/A',
+                className: student?.class || 'N/A',
+                nis: student?.nis || 'N/A',
+            };
+        }).filter(p => filterType === 'Semua' || p.type === filterType);
+
+        // Sorting: Jenis Bayar (Tipe) > Kelas > Nama Siswa
+        list.sort((a, b) => {
+            // 1. Sort by Type
+            if (a.type < b.type) return -1;
+            if (a.type > b.type) return 1;
+            
+            // 2. Sort by Class
+            if (a.className < b.className) return -1;
+            if (a.className > b.className) return 1;
+
+            // 3. Sort by Student Name
+            if (a.studentName < b.studentName) return -1;
+            if (a.studentName > b.studentName) return 1;
+            
+            // 4. Secondary sort by Date (latest first)
+            return new Date(b.date) - new Date(a.date);
+        });
+        
+        return list;
+    }, [payments, students, filterType]);
+
+    // FUNGSI DELETE (MEMBUKA MODAL KONFIRMASI)
+    const handleDelete = (transaction) => {
+        if (!isAllowedToEdit) { setMessage({ type: 'error', text: 'Akses Ditolak: Hanya Admin Keuangan/TU yang dapat menghapus transaksi.' }); return; }
+        setTransactionToDelete(transaction);
+        setIsDeleteModalOpen(true);
+    };
+
+    // FUNGSI KONFIRMASI DELETE
+    const confirmDelete = async () => {
+        if (!isAllowedToEdit || !transactionToDelete) return;
+        
+        try {
+            await deleteDoc(doc(db, getCollectionPath('payments'), transactionToDelete.id));
+            setMessage({ type: 'success', text: `Transaksi ${transactionToDelete.type} sebesar ${formatRupiah(transactionToDelete.amount)} berhasil dihapus.` });
+        } catch (e) {
+            console.error("Error deleting transaction: ", e);
+            setMessage({ type: 'error', text: 'Gagal menghapus transaksi.' });
+        } finally {
+            setTransactionToDelete(null);
+            setIsDeleteModalOpen(false);
+        }
+    };
+
+
+    const exportHistoryData = () => {
+        const dataToExport = filteredAndSortedPayments.map(p => ({
+            Tanggal: new Date(p.date).toLocaleDateString('id-ID'),
+            Jenis_Bayar: p.type,
+            Kelas: p.className,
+            NIS: p.nis,
+            Nama: p.studentName,
+            Periode: `${p.month}/${p.year}`,
+            Jumlah: p.amount,
+            Metode: p.method,
+        }));
+
+        if (dataToExport.length === 0) {
+            setMessage({ type: 'warning', text: 'Tidak ada riwayat pembayaran yang dapat diexport.' });
+            return;
+        }
+
+        if (exportToCSV(dataToExport, `riwayat_pembayaran_${filterType}_${new Date().toISOString().substring(0, 10)}.csv`)) {
+            setMessage({ type: 'success', text: 'Riwayat pembayaran berhasil diexport ke Excel (CSV).' });
+        } else {
+             setMessage({ type: 'error', text: 'Gagal mengunduh riwayat pembayaran. Coba lagi.' });
+        }
+    };
+
+    // Modal Konfirmasi Delete
+    const DeleteConfirmationModal = () => (
+        <Modal 
+            isOpen={isDeleteModalOpen} 
+            onClose={() => setIsDeleteModalOpen(false)} 
+            title="Konfirmasi Penghapusan Transaksi" 
+            maxWidth="max-w-sm"
+        >
+            <div className="text-center p-4">
+                <Trash2 className="w-12 h-12 text-red-500 mx-auto mb-4" />
+                <p className="text-gray-700 dark:text-gray-300">
+                    Apakah Anda yakin ingin menghapus transaksi **{transactionToDelete?.type}** sebesar **{formatRupiah(transactionToDelete?.amount)}** untuk siswa **{transactionToDelete?.studentName}**?
+                    Tindakan ini tidak dapat dibatalkan.
+                </p>
+                <div className="flex justify-center space-x-4 mt-6">
+                    <button 
+                        onClick={() => setIsDeleteModalOpen(false)} 
+                        className="bg-gray-300 dark:bg-gray-600 text-gray-800 dark:text-white px-4 py-2 rounded-xl hover:bg-gray-400 dark:hover:bg-gray-700 transition"
+                    >
+                        Batal
+                    </button>
+                    <button 
+                        onClick={confirmDelete} 
+                        className="bg-red-600 text-white px-4 py-2 rounded-xl hover:bg-red-700 transition"
+                    >
+                        Ya, Hapus Permanen
+                    </button>
+                </div>
+            </div>
+        </Modal>
+    );
+
+
+    return (
+        <div className="space-y-6">
+            <DeleteConfirmationModal />
+
+            <h2 className="text-3xl font-bold text-gray-800 dark:text-white">Riwayat Transaksi (Pembayaran Siswa)</h2>
+
+            <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700">
+                <div className="flex flex-col md:flex-row justify-between items-center gap-4 mb-6">
+                    <div className="flex gap-3 items-center">
+                        <label className="text-sm font-medium text-gray-600 dark:text-gray-400">Filter Jenis Pembayaran:</label>
+                        <select
+                            value={filterType}
+                            onChange={(e) => setFilterType(e.target.value)}
+                            className="px-4 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-xl focus:ring-blue-500 focus:border-blue-500"
+                        >
+                            {paymentTypes.map(type => (
+                                <option key={type} value={type}>{type}</option>
+                            ))}
+                        </select>
+                    </div>
+                    {/* Export Tombol selalu terlihat (kecuali Guest) */}
+                    {(userRole !== ROLES.GUEST) && (
+                        <button
+                            onClick={exportHistoryData}
+                            disabled={filteredAndSortedPayments.length === 0}
+                            className={`flex items-center text-white px-4 py-2 rounded-xl shadow-md transition duration-200 text-sm font-semibold ${filteredAndSortedPayments.length > 0 ? 'bg-purple-600 hover:bg-purple-700' : 'bg-gray-400 cursor-not-allowed'}`}
+                        >
+                            <Download className="w-5 h-5 mr-2" /> Export Riwayat ({filteredAndSortedPayments.length})
+                        </button>
+                    )}
+                </div>
+
+                {message && (
+                    <div className={`p-4 rounded-xl font-medium flex justify-between items-center mb-6 ${message.type === 'success' ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' : message.type === 'warning' ? 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300' : 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300'}`}>
+                        {message.text}
+                        <button onClick={() => setMessage(null)}><X className="w-5 h-5" /></button>
+                    </div>
+                )}
+
+
+                {/* TABEL TUNGGAL BARU */}
+                <div className="overflow-x-auto max-h-[70vh] overflow-y-auto">
+                    <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                        <thead className="bg-gray-50 dark:bg-gray-700 sticky-header">
+                            <tr>
+                                <th className="px-6 py-2.5 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Jenis Bayar</th>
+                                <th className="px-6 py-2.5 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Kelas</th>
+                                <th className="px-6 py-2.5 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Nama Siswa / NIS</th>
+                                <th className="px-6 py-2.5 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Tanggal</th>
+                                <th className="px-6 py-2.5 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Periode</th>
+                                <th className="px-6 py-2.5 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Jumlah (Rp)</th>
+                                <th className="px-6 py-2.5 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Metode</th>
+                                {isAllowedToEdit && <th className="px-6 py-2.5 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Aksi</th>}
+                            </tr>
+                        </thead>
+                        <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                            {filteredAndSortedPayments.length > 0 ? filteredAndSortedPayments.map(p => (
+                                <tr key={p.id} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                                    <td className="px-6 py-3 whitespace-nowrap text-sm font-medium text-blue-600 dark:text-blue-400">{p.type}</td>
+                                    <td className="px-6 py-3 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">{p.className}</td>
+                                    <td className="px-6 py-3 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">{p.studentName} ({p.nis})</td>
+                                    <td className="px-6 py-3 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">{new Date(p.date).toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' })}</td>
+                                    <td className="px-6 py-3 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">{p.month}/{p.year}</td>
+                                    <td className="px-6 py-3 whitespace-nowrap text-sm font-semibold text-emerald-600 dark:text-emerald-400 text-right">{formatRupiah(p.amount)}</td>
+                                    <td className="px-6 py-3 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">{p.method}</td>
+                                    {isAllowedToEdit && (
+                                        <td className="px-6 py-3 whitespace-nowrap text-sm font-medium">
+                                            <button 
+                                                onClick={() => handleDelete(p)}
+                                                className="text-red-600 hover:text-red-800 text-xs font-semibold"
+                                            >
+                                                Hapus
+                                            </button>
+                                        </td>
+                                    )}
+                                </tr>
+                            )) : (
+                                <tr>
+                                    <td colSpan={isAllowedToEdit ? "8" : "7"} className="text-center py-10 text-gray-500 dark:text-gray-400 italic">Tidak ada riwayat pembayaran siswa yang ditemukan untuk filter ini.</td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+
+// --- KOMPONEN LAPORAN UMUM, PENGATURAN... (DIHILANGKAN UNTUK KERINGKASAN) ---
+const GeneralReports = ({ payments, cashFlow, userRole }) => {
+    const isAllowed = userRole === ROLES.ADMIN_KEUANGAN || userRole === ROLES.KEPALA_SEKOLAH;
+    const [filterYear, setFilterYear] = useState(today.getFullYear());
+    const [message, setMessage] = useState(null);
+
+    const availableYears = useMemo(() => {
+        const years = new Set();
+        [...payments, ...cashFlow].forEach(item => {
+            if (item.date) {
+                years.add(new Date(item.date).getFullYear());
+            }
+        });
+        const sortedYears = [...years].sort((a, b) => b - a);
+        if (!sortedYears.includes(today.getFullYear())) {
+            sortedYears.unshift(today.getFullYear());
+        }
+        return [...new Set(sortedYears)].filter(y => y > 2000); // Filter untuk keamanan
+    }, [payments, cashFlow]);
+
+
+    const monthlySummary = useMemo(() => {
+        const summary = {};
+        const months = Array.from({ length: 12 }, (_, i) => ({ 
+            month: i, 
+            label: new Date(filterYear, i).toLocaleString('id-ID', { month: 'long' }),
+            income: 0,
+            expense: 0,
+            spp: 0,
+            kasMasuk: 0,
+            kasKeluar: 
+                0
+        }));
+
+        // Initialize months
+        months.forEach(m => summary[m.month] = m);
+
+        // Process payments (SPP Income)
+        payments.forEach(p => {
+            const date = new Date(p.date);
+            if (date.getFullYear() === filterYear) {
+                const month = date.getMonth();
+                summary[month].income += p.amount;
+                summary[month].spp += p.amount;
+            }
+        });
+
+        // Process cashFlow
+        cashFlow.forEach(c => {
+            const date = new Date(c.date);
+            if (date.getFullYear() === filterYear) {
+                const month = date.getMonth();
+                if (c.type === 'Kas Masuk') {
+                    summary[month].income += c.amount;
+                    summary[month].kasMasuk += c.amount;
+                } else if (c.type === 'Kas Keluar') {
+                    summary[month].expense += c.amount;
+                    summary[month].kasKeluar += c.amount;
+                }
+            }
+        });
+
+        return Object.values(summary);
+    }, [payments, cashFlow, filterYear]);
+
+    const overallTotals = monthlySummary.reduce((acc, month) => {
+        acc.totalIncome += month.income;
+        acc.totalExpense += month.expense;
+        acc.totalSPP += month.spp;
+        acc.totalKasMasuk += month.kasMasuk;
+        acc.totalKasKeluar += month.kasKeluar;
+        acc.netCashFlow = acc.totalIncome - acc.totalExpense;
+        return acc;
+    }, { totalIncome: 0, totalExpense: 0, totalSPP: 0, totalKasMasuk: 0, totalKasKeluar: 0, netCashFlow: 0 });
+
+
+    if (!isAllowed) {
+        return <div className="p-8 bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300 rounded-xl shadow-lg border border-red-200 dark:border-red-700"><h2 className="text-2xl font-bold mb-4">Akses Ditolak</h2><p>Anda tidak memiliki izin untuk melihat Laporan Keuangan.</p></div>;
+    }
+
+    const CashflowCard = ({ title, value, icon: Icon, color }) => (
+        <div className={`p-4 rounded-xl shadow-lg border ${color.border} bg-white dark:bg-gray-800`}>
+            <div className={`p-2 rounded-lg inline-flex mb-2 ${color.bg} ${color.text}`}>
+                <Icon className="w-5 h-5" />
+            </div>
+            <p className="text-sm font-medium text-gray-500 dark:text-gray-400">{title}</p>
+            <h3 className="mt-0.5 text-2xl font-bold text-gray-900 dark:text-white truncate">{value}</h3>
+        </div>
+    );
+    
+    // --- FUNGSI DOWNLOAD BARU (RINCI) ---
+    const exportReportData = () => {
+        const dataToExport = monthlySummary.map(month => ({
+            Bulan: `${month.label} ${filterYear}`,
+            'Penerimaan SPP': month.spp,
+            'Kas Masuk Umum': month.kasMasuk,
+            'Total Pemasukan': month.income,
+            'Total Pengeluaran': month.expense,
+            'Arus Kas Bersih': month.income - month.expense,
+        }));
+        
+        // Add Total Row
+        dataToExport.push({
+            Bulan: `TOTAL TAHUN ${filterYear}`,
+            'Penerimaan SPP': overallTotals.totalSPP,
+            'Kas Masuk Umum': overallTotals.totalKasMasuk,
+            'Total Pemasukan': overallTotals.totalIncome,
+            'Total Pengeluaran': overallTotals.totalExpense,
+            'Arus Kas Bersih': overallTotals.netCashFlow,
+        });
+
+        if (dataToExport.length === 0) {
+            setMessage({ type: 'warning', text: 'Tidak ada data yang dapat diexport.' });
+            return;
+        }
+
+        if (exportToCSV(dataToExport, `laporan_keuangan_tahun_${filterYear}_rinci.csv`)) {
+            setMessage({ type: 'success', text: `Laporan Keuangan Rinci Tahunan ${filterYear} berhasil diunduh.` });
+        } else {
+             setMessage({ type: 'error', text: 'Gagal mengunduh laporan.' });
+        }
+    };
+    // ----------------------------
+
+
+    return (
+        <div className="space-y-6">
+            <h2 className="text-3xl font-bold text-gray-800 dark:text-white">Laporan Keuangan Tahunan</h2>
+
+            {/* Filter */}
+            <div className="flex justify-between items-center bg-white dark:bg-gray-800 p-4 rounded-xl shadow-md border border-gray-100 dark:border-gray-700">
+                <h3 className="text-xl font-semibold text-gray-800 dark:text-white">Ringkasan Tahun {filterYear}</h3>
+                <div className="flex gap-4 items-center">
+                    <button
+                        onClick={exportReportData}
+                        className="flex items-center text-white px-4 py-2 rounded-xl shadow-md transition duration-200 text-sm font-semibold bg-indigo-600 hover:bg-indigo-700"
+                        disabled={monthlySummary.every(m => m.income === 0 && m.expense === 0)}
+                    >
+                        <Download className="w-5 h-5 mr-2" /> Download Laporan Rinci
+                    </button>
+                    <label className="text-sm font-medium text-gray-600 dark:text-gray-400">Pilih Tahun:</label>
+                    <select
+                        value={filterYear}
+                        onChange={(e) => setFilterYear(Number(e.target.value))}
+                        className="px-4 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-xl focus:ring-blue-500 focus:border-blue-500"
+                    >
+                        {availableYears.map(year => (
+                            <option key={year} value={year}>{year}</option>
+                        ))}
+                    </select>
+                </div>
+            </div>
+            
+            {/* Display message */}
+            {message && (
+                <div className={`p-4 rounded-xl font-medium flex justify-between items-center mb-6 ${message.type === 'success' ? 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300' : message.type === 'warning' ? 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300' : 'bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300'}`}>
+                    {message.text}
+                    <button onClick={() => setMessage(null)}><X className="w-5 h-5" /></button>
+                </div>
+            )}
+
+
+            {/* Summary Cards by Function */}
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                <CashflowCard 
+                    title="Total Pemasukan (Gross)" 
+                    value={formatRupiah(overallTotals.totalIncome)} 
+                    icon={ArrowUpRight} 
+                    color={{ bg: 'bg-emerald-100', text: 'text-emerald-700', border: 'border-emerald-300' }}
+                />
+                <CashflowCard 
+                    title="Total Pengeluaran" 
+                    value={formatRupiah(overallTotals.totalExpense)} 
+                    icon={ArrowDownRight} 
+                    color={{ bg: 'bg-red-100', text: 'text-red-700', border: 'border-red-300' }}
+                />
+                <CashflowCard 
+                    title="Arus Kas Bersih (Net)" 
+                    value={formatRupiah(overallTotals.netCashFlow)} 
+                    icon={TrendingUp} 
+                    color={{ bg: 'bg-blue-100', text: 'text-blue-700', border: 'border-blue-300' }}
+                />
+                 <CashflowCard 
+                    title="Total Penerimaan SPP" 
+                    value={formatRupiah(overallTotals.totalSPP)} 
+                    icon={CreditCard} 
+                    color={{ bg: 'bg-yellow-100', text: 'text-yellow-700', border: 'border-yellow-300' }}
+                />
+                <CashflowCard 
+                    title="Total Kas Umum Lain" 
+                    value={formatRupiah(overallTotals.totalKasMasuk)} 
+                    icon={DollarSign} 
+                    color={{ bg: 'bg-purple-100', text: 'text-purple-700', border: 'border-purple-300' }}
+                />
+            </div>
+
+
+            {/* Monthly Detail Table */}
+            <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700">
+                <h3 className="text-xl font-bold text-gray-800 dark:text-white mb-4">Laporan Bulanan Detail</h3>
+                <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                        <thead className="bg-gray-50 dark:bg-gray-700">
+                            <tr>
+                                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Bulan</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Penerimaan SPP</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Kas Masuk Umum</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Total Pemasukan</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Total Pengeluaran</th>
+                                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Arus Kas Bersih</th>
+                            </tr>
+                        </thead>
+                        <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                            {monthlySummary.map(month => (
+                                <tr key={month.month} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">{month.label} {filterYear}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300 text-right">{formatRupiah(month.spp)}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300 text-right">{formatRupiah(month.kasMasuk)}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-emerald-600 dark:text-emerald-400 text-right">{formatRupiah(month.income)}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-semibold text-red-600 dark:text-red-400 text-right">{formatRupiah(month.expense)}</td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-bold text-blue-700 dark:text-blue-400 text-right">{formatRupiah(month.income - month.expense)}</td>
+                                </tr>
+                            ))}
+                            {/* Row Total */}
+                            <tr className="bg-blue-50 dark:bg-blue-900/50 border-t-2 border-blue-200 dark:border-blue-700 font-bold">
+                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">TOTAL TAHUN {filterYear}</td>
+                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white text-right">{formatRupiah(overallTotals.totalSPP)}</td>
+                                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white text-right">{formatRupiah(overallTotals.totalKasMasuk)}</td>
+                                <td className="px-6 py-4 whitespace-nowrap text-sm text-emerald-700 dark:text-emerald-400 text-right">{formatRupiah(overallTotals.totalIncome)}</td>
+                                <td className="px-6 py-4 whitespace-nowrap text-sm text-red-700 dark:text-red-400 text-right">{formatRupiah(overallTotals.totalExpense)}</td>
+                                <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-800 dark:text-blue-400 text-right">{formatRupiah(overallTotals.netCashFlow)}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// Placeholder components (Laporan Umum dan Pengaturan)
+const SettingsManagement = ({ userRole }) => {
+    const isAdmin = userRole === ROLES.ADMIN_KEUANGAN;
+
+    if (!isAdmin) {
+        return <div className="p-8 bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300 rounded-xl shadow-lg border border-red-200 dark:border-red-700"><h2 className="text-2xl font-bold mb-4">Akses Ditolak</h2><p>Hanya Admin Keuangan yang memiliki akses ke Pengaturan Aplikasi.</p></div>;
+    }
+
+    return (
+        <div className="space-y-8">
+            <h2 className="text-3xl font-bold text-gray-800 dark:text-white">Pengaturan Aplikasi & Manajemen Akses</h2>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                
+                {/* Manajemen Pengguna */}
+                <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700 space-y-4">
+                    <div className="flex items-center space-x-3 text-blue-700 dark:text-blue-400">
+                        <UserCog className="w-6 h-6" />
+                        <h3 className="text-xl font-bold">Manajemen Pengguna & Peran</h3>
+                    </div>
+                    <p className="text-gray-600 dark:text-gray-400">Mengelola akun, menetapkan peran (Admin, TU, Kepala Sekolah), dan mengelola otorisasi akses.</p>
+                    <button onClick={() => alert('Simulasi: Membuka Daftar Pengguna.')} className="w-full bg-blue-500 text-white px-4 py-2 rounded-xl hover:bg-blue-600 transition font-semibold">
+                        Kelola Akun (Admin Only)
+                    </button>
+                    <div className="text-xs text-gray-400 dark:text-gray-500 border-t border-gray-200 dark:border-gray-600 pt-2 mt-2">
+                        <p>Peran saat ini: {userRole}</p>
+                        <p>Total User Aktif (Simulasi): 4</p>
+                    </div>
+                </div>
+
+                {/* Konfigurasi Sekolah */}
+                <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700 space-y-4">
+                    <div className="flex items-center space-x-3 text-purple-700 dark:text-purple-400">
+                        <Settings className="w-6 h-6" />
+                        <h3 className="text-xl font-bold">Konfigurasi Sistem Dasar</h3>
+                    </div>
+                    <p className="text-gray-600 dark:text-gray-400">Mengatur nama sekolah, tahun ajaran aktif, dan opsi pembayaran default.</p>
+                    <button onClick={() => alert('Simulasi: Membuka Formulir Konfigurasi Sekolah.')} className="w-full bg-purple-500 text-white px-4 py-2 rounded-xl hover:bg-purple-600 transition font-semibold">
+                        Konfigurasi Sekolah
+                    </button>
+                    <div className="text-xs text-gray-400 dark:text-gray-500 border-t border-gray-200 dark:border-gray-600 pt-2 mt-2">
+                        <p>Tahun Ajaran Aktif: {today.getFullYear()}/{today.getFullYear() + 1}</p>
+                    </div>
+                </div>
+
+                {/* Integrasi Pihak Ketiga */}
+                <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-100 dark:border-gray-700 space-y-4">
+                    <div className="flex items-center space-x-3 text-emerald-700 dark:text-emerald-400">
+                        <Zap className="w-6 h-6" />
+                        <h3 className="text-xl font-bold">Integrasi & API</h3>
+                    </div>
+                    <p className="text-gray-600 dark:text-gray-400">Mengelola kunci API untuk notifikasi WhatsApp/Email dan *payment gateway*.</p>
+                    <button onClick={() => alert('Simulasi: Membuka Pengaturan API Integrasi.')} className="w-full bg-emerald-500 text-white px-4 py-2 rounded-xl hover:bg-emerald-600 transition font-semibold">
+                        Kelola Integrasi (API)
+                    </button>
+                    <div className="text-xs text-gray-400 dark:text-gray-500 border-t border-gray-200 dark:border-gray-600 pt-2 mt-2">
+                        <p>WhatsApp API: Terhubung (Simulasi)</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// --- KOMPONEN BARU: LAYAR LOGIN OTENTIKASI ---
+const LoginScreen = ({ loginErrorText, isLoggingInState, setLoginErrorText, setIsLoggingIn, setLocalVerifiedEmail }) => {
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
+
+    const handleLogin = async (e) => {
+        e.preventDefault();
+        setLoginErrorText('');
+
+        // 1. Cek kredensial lokal (Simulasi verifikasi password)
+        const demoUser = DEMO_USERS[email];
+        if (!demoUser || demoUser.password !== password) {
+             setLoginErrorText('Kombinasi Email dan Password salah.');
+             return;
+        }
+
+        setIsLoggingIn(true);
+        try {
+            // 2. Kredensial lokal valid, lakukan Sign-in Anonim untuk mendapatkan UID
+            await signInAnonymously(auth);
+            
+            // 3. Simpan email yang diverifikasi secara lokal untuk dipetakan ke peran
+            setLocalVerifiedEmail(email);
+
+            // AuthStateChanged di App component akan menangani state perubahan dan pemetaan peran
+        } catch (error) {
+            console.error("Firebase Login Error:", error);
+            // Tangani error Firebase (misalnya, jika anonymous auth dinonaktifkan)
+            setLoginErrorText('Gagal koneksi ke server otentikasi. Silakan refresh halaman.');
+        } finally {
+            // Jangan set isLoggingIn ke false di sini, biarkan onAuthStateChanged menanganinya
+            // untuk menghindari flicker UI
+        }
+    };
+
+    return (
+        <div className="flex items-center justify-center min-h-screen bg-gray-100 dark:bg-gray-900 p-4">
+            <div className="w-full max-w-md bg-white dark:bg-gray-800 p-8 rounded-2xl shadow-2xl border border-gray-200 dark:border-gray-700">
+                <div className="text-center mb-8">
+                    <h1 className="3xl font-extrabold text-blue-900 dark:text-white">SMP Muhammadiyah 7</h1> {/* TITLE CHANGED */}
+                    <p className="text-gray-500 dark:text-gray-400 mt-2">Masuk untuk melanjutkan ke Dashboard</p>
+                </div>
+                
+                {loginErrorText && (
+                    <div className="p-3 bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300 rounded-lg mb-4 text-sm font-medium">
+                        {loginErrorText}
+                    </div>
+                )}
+                
+                <form onSubmit={handleLogin} className="space-y-6">
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Email</label>
+                        <input
+                            type="email"
+                            placeholder="Contoh: admin123@smpmuh7.sch.id"
+                            value={email}
+                            onChange={(e) => setEmail(e.target.value)}
+                            required
+                            className="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-xl focus:ring-blue-500 focus:border-blue-500 transition"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Password</label>
+                        <input
+                            type="password"
+                            placeholder="Password Anda"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            required
+                            className="w-full px-4 py-3 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-xl focus:ring-blue-500 focus:border-blue-500 transition"
+                        />
+                    </div>
+                    
+                    <button
+                        type="submit"
+                        className={`w-full text-white px-4 py-3 rounded-xl shadow-lg transition duration-200 flex items-center justify-center font-semibold ${isLoggingInState ? 'bg-blue-400 cursor-wait' : 'bg-blue-600 hover:bg-blue-700'}`}
+                        disabled={isLoggingInState}
+                    >
+                        {isLoggingInState ? <Loader className="w-5 h-5 mr-2 animate-spin" /> : <LogIn className="w-5 h-5 mr-2" />}
+                        {isLoggingInState ? 'Memproses...' : 'Login'}
+                    </button>
+                </form>
+
+                <div className="mt-8 p-4 bg-gray-50 dark:bg-gray-700 rounded-xl text-sm border border-gray-200 dark:border-gray-600">
+                    <p className="font-semibold text-gray-700 dark:text-gray-300 mb-2">Akun Demo (Password: 123):</p>
+                    <ul className="space-y-1 text-xs text-gray-600 dark:text-gray-400">
+                        <li>- Admin Keuangan: **admin123@smpmuh7.sch.id**</li>
+                        <li>- Tata Usaha: **tatausaha123@smpmuh7.sch.id**</li>
+                        <li>- Kepala Sekolah: **kepsek123@smpmuh7.sch.id**</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+
+/**
+ * Main Application Component
+ */
+const App = () => {
+    const [dbInstance, setDbInstance] = useState(null);
+    const [isAuthReady, setIsAuthReady] = useState(false);
+    const [isAuthenticated, setIsAuthenticated] = useState(false);
+    const [userId, setUserId] = useState(null);
+    const [userRole, setUserRole] = useState(ROLES.GUEST);
+    const [currentView, setCurrentView] = useState('dashboard');
+    const [isMobileOpen, setIsMobileOpen] = useState(false);
+    const [isLoadingData, setIsLoadingData] = useState(false); // Default false for Login
+    const [loginError, setLoginError] = useState('');
+    const [isLoggingIn, setIsLoggingIn] = useState(false);
+    // State baru untuk menyimpan email yang berhasil diverifikasi (tanpa Firebase Auth)
+    const [verifiedEmail, setVerifiedEmail] = useState(null);
+    const [isDarkMode, setIsDarkMode] = useState(false); // Dark Mode State
+
+
+    // --- FUNGSI TOGGLE DARK MODE DIPINDAH KE SINI ---
+    const toggleDarkMode = () => {
+        setIsDarkMode(prev => {
+            const newState = !prev;
+            localStorage.setItem('darkMode', newState ? 'true' : 'false');
+            return newState;
+        });
+    };
+
+
+    // State for Firestore data
+    const [students, setStudents] = useState([]);
+    const [payments, setPayments] = useState([]);
+    const [cashFlow, setCashFlow] = useState([]);
+    const [fees, setFees] = useState([]); 
+    
+    // --- DARK MODE SETUP ---
+    useEffect(() => {
+        const storedMode = localStorage.getItem('darkMode');
+        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        
+        // Tentukan mode awal
+        const initialMode = storedMode === 'true' || (storedMode === null && prefersDark);
+        setIsDarkMode(initialMode);
+        
+        // Terapkan class pada elemen root
+        if (initialMode) {
+            document.documentElement.classList.add('dark');
+        } else {
+            document.documentElement.classList.remove('dark');
+        }
+    }, []);
+    
+    // Terapkan class ketika isDarkMode berubah
+    useEffect(() => {
+        if (isDarkMode) {
+            document.documentElement.classList.add('dark');
+        } else {
+            document.documentElement.classList.remove('dark');
+        }
+    }, [isDarkMode]);
+    // -----------------------
+
+
+    // --- FIREBASE INITIALIZATION & AUTHENTICATION ---
+    useEffect(() => {
+        setDbInstance(db);
+        
+        // 1. Sign-in Awal (Custom Token atau Anonim) untuk mendapatkan UID segera
+        const authPromise = initialAuthToken 
+            ? signInWithCustomToken(auth, initialAuthToken) 
+            : signInAnonymously(auth);
+
+        authPromise.catch(error => {
+            console.error("Firebase Initial Auth Error:", error);
+            // Tetap lanjut, biarkan onAuthStateChanged yang menangani
+        });
+
+        // 2. Listener Auth State
+        const unsubscribe = onAuthStateChanged(auth, (user) => {
+            if (user && user.uid) {
+                setUserId(user.uid);
+                // Peran sekarang dipetakan dari email yang diverifikasi secara lokal
+                const role = verifiedEmail ? getUserRoleByEmail(verifiedEmail) : ROLES.GUEST;
+                setUserRole(role);
+                setIsAuthenticated(true);
+                // Sinkronkan localVerifiedEmail ke variabel global untuk Sidebar
+                localVerifiedEmail = verifiedEmail; 
+            } else {
+                setUserId(null);
+                setUserRole(ROLES.GUEST);
+                setIsAuthenticated(false);
+                localVerifiedEmail = null; 
+            }
+            setIsAuthReady(true);
+            setIsLoggingIn(false);
+        });
+
+        return () => unsubscribe(); 
+    }, [verifiedEmail]); // Dependency ditambahkan
+
+    
+    // Handler Logout
+    const handleLogout = async () => {
+        try {
+            await signOut(auth);
+            setVerifiedEmail(null); // Reset verified email
+            setCurrentView('dashboard'); // Reset view after logout
+            setLoginError('');
+        } catch (error) {
+            console.error("Logout Error:", error);
+        }
+    };
+
+    // --- FIRESTORE DATA LISTENERS ---
+    useEffect(() => {
+        // HANYA AKAN MENGAMBIL DATA JIKA SUDAH AUTHENTICATED
+        // Menggunakan isAuthenticated sebagai penanda stabil.
+        if (!dbInstance || !isAuthenticated || !userId) {
+            setStudents([]);
+            setPayments([]);
+            setCashFlow([]);
+            setFees([]);
+            setIsLoadingData(false);
+            return;
+        }
+        setIsLoadingData(true);
+
+        const collections = ['students', 'payments', 'cashflow', 'fees'];
+        const unsubscribeFunctions = [];
+
+        // Penundaan kecil (150ms) untuk stabilitas autentikasi
+        const delayTimeout = setTimeout(() => {
+            
+            collections.forEach(collectionName => {
+                const path = getCollectionPath(collectionName);
+                const q = query(collection(dbInstance, path));
+                
+                const unsubscribe = onSnapshot(q, (snapshot) => {
+                    let list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    
+                    // Sorting in memory (karena orderBy dilarang/menyebabkan izin error)
+                    if (collectionName === 'payments' || collectionName === 'cashflow') {
+                        list.sort((a, b) => new Date(b.date) - new Date(a.date));
+                    }
+
+                    if (collectionName === 'students') setStudents(list);
+                    if (collectionName === 'payments') setPayments(list);
+                    if (collectionName === 'cashflow') setCashFlow(list);
+                    if (collectionName === 'fees') setFees(list);
+
+                    // Panggil ini sekali setelah data pertama dari semua koleksi diterima
+                    setIsLoadingData(false); 
+                }, (error) => {
+                    console.error(`Error listening to ${collectionName}:`, error.message);
+                    setIsLoadingData(false); 
+                });
+                unsubscribeFunctions.push(unsubscribe);
+            });
+
+        }, 150); 
+
+        return () => {
+            clearTimeout(delayTimeout);
+            unsubscribeFunctions.forEach(unsub => unsub());
+        };
+    }, [dbInstance, isAuthenticated, userId]); 
+
+    // --- RENDER LOGIC ---
+    const renderContent = () => {
+        if (!isAuthReady || isLoggingIn) {
+             return (
+                <div className="flex items-center justify-center min-h-screen">
+                    <Loader className="animate-spin w-8 h-8 mr-3 text-blue-500" />
+                    Memuat Aplikasi...
+                </div>
+            );
+        }
+
+        if (!isAuthenticated) {
+            // FIX: Passing the verified email setter to the LoginScreen
+            return <LoginScreen 
+                loginErrorText={loginError} 
+                isLoggingInState={isLoggingIn} 
+                setLoginErrorText={setLoginError} 
+                setIsLoggingIn={setIsLoggingIn} 
+                setLocalVerifiedEmail={setVerifiedEmail}
+            />;
+        }
+        
+        if (isLoadingData) {
+            return (
+                <div className="flex items-center justify-center h-96 text-lg text-blue-600 bg-white dark:bg-gray-800 rounded-2xl shadow-xl mt-8">
+                    <Loader className="animate-spin w-8 h-8 mr-3 text-blue-500" />
+                    Memuat Data Canggih...
+                </div>
+            );
+        }
+
+
+        switch (currentView) {
+            case 'dashboard':
+                return <Dashboard payments={payments} students={students} cashFlow={cashFlow} fees={fees} setView={setCurrentView} />;
+            case 'students':
+                return <StudentManagement students={students} userRole={userRole} />;
+            case 'fees':
+                return <FeesManagement fees={fees} userRole={userRole} />;
+            case 'payments':
+                return <PaymentWizard students={students} payments={payments} fees={fees} userRole={userRole} />;
+            case 'paymentHistory': // RENAMED ROUTE: Riwayat Transaksi -> StudentPaymentHistory (PENGELOMPOKAN KHUSUS)
+                return <StudentPaymentHistory students={students} payments={payments} userRole={userRole} />;
+            case 'cashflow':
+                return <CashFlowManagement cashFlow={cashFlow} userRole={userRole} />; 
+            case 'arrears':
+                return <ArrearsReport students={students} payments={payments} fees={fees} userRole={userRole} />; 
+            case 'reports':
+                return <GeneralReports payments={payments} cashFlow={cashFlow} userRole={userRole} />; // Update props
+            case 'settings':
+                return <SettingsManagement userRole={userRole} />; 
+            default:
+                return <Dashboard payments={payments} students={students} cashFlow={cashFlow} fees={fees} setView={setCurrentView} />;
+        }
+    };
+
+    // Render utama
+    if (!isAuthenticated) {
+         return (
+            <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex flex-col font-[Inter]">
+                <script src="https://cdn.tailwindcss.com"></script>
+                <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap'); body { font-family: 'Inter', sans-serif; background-color: #f9fafb; }`}</style>
+                {renderContent()}
+            </div>
+        );
+    }
+    
+    return (
+        <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex flex-col font-[Inter]">
+            <script src="https://cdn.tailwindcss.com"></script>
+            <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+            <style>
+                {`
+                    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+                    body { font-family: 'Inter', sans-serif; background-color: #f9fafb; }
+                    /* Style untuk sticky header pada tabel Laporan Piutang */
+                    .sticky-header th { position: sticky; top: 0; background-color: #f9fafb; z-index: 20; }
+                    .dark .sticky-header th { background-color: #1f2937; } /* Dark mode header fix */
+                `}
+            </style>
+            
+            {/* Main Layout Wrapper */}
+            <div className="flex flex-1">
+                {/* Overlay for mobile sidebar */}
+                {isMobileOpen && <div className="fixed inset-0 bg-black bg-opacity-50 z-40 lg:hidden" onClick={() => setIsMobileOpen(false)}></div>}
+
+                {/* Floating Sidebar Toggle Button (Mobile/Tablet) */}
+                <button
+                    onClick={() => setIsMobileOpen(true)}
+                    className={`fixed left-0 top-1/2 -translate-y-1/2 p-2 rounded-r-xl shadow-lg bg-blue-600 text-white z-30 transition-transform lg:hidden ${isMobileOpen ? 'translate-x-full opacity-0' : 'translate-x-0'}`}
+                    aria-label="Open Sidebar"
+                >
+                    <Menu className="w-5 h-5" />
+                </button>
+
+
+                {/* Sidebar (Desktop: visible, Mobile: toggled) */}
+                <Sidebar 
+                    currentView={currentView} 
+                    setView={setCurrentView} 
+                    userRole={userRole} 
+                    isMobileOpen={isMobileOpen} 
+                    setIsMobileOpen={setIsMobileOpen} 
+                    onLogout={handleLogout} 
+                    // isDarkMode={isDarkMode} // Tidak diperlukan lagi
+                />
+
+                {/* Main Content Area */}
+                <div className="flex-1 lg:ml-64 p-4 sm:p-8 flex flex-col min-h-[calc(100vh-4rem)]">
+                    
+                    {/* Page Header Component (Baru) */}
+                    <PageHeader 
+                        currentView={currentView} 
+                        userRole={userRole} 
+                        isDarkMode={isDarkMode} 
+                        toggleDarkMode={toggleDarkMode} // Fungsi toggle sekarang didefinisikan di App dan dikirim
+                    />
+
+                    {/* Content */}
+                    <div className="pt-4 lg:pt-0 flex-1">
+                        {renderContent()}
+                    </div>
+
+                    {/* Footer */}
+                    <footer className="w-full mt-10 border-t border-gray-200 dark:border-gray-700 py-4 text-center">
+                        <p className="text-xs text-gray-500 dark:text-gray-400">
+                            copyright&copy; 2025 . SMP Muhammadiyah 7 - All Rights Reserved. Created by Deni Ahmad
+                        </p>
+                    </footer>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+export default App;
